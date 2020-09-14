@@ -3545,6 +3545,7 @@ modify_op(cterm_state *cstate, int cpri ARG_LD)
       queue_out_op(0, op->tpos, _PL_rd);
       cstate->out_n++;
       PopOp(cstate);
+      return 2;
     } else if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
 		isOp(op, OP_POSTFIX, _PL_rd PASS_LD) )
     { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfix\n", stringOp(op)));
@@ -3552,6 +3553,7 @@ modify_op(cterm_state *cstate, int cpri ARG_LD)
       if ( !build_op_term(op, _PL_rd PASS_LD) )
 	return FALSE;
       PopOp(cstate);
+      return 2;
     }
   }
 
@@ -3666,6 +3668,7 @@ modify_prefix_infix_pa(cterm_state *cstate ARG_LD)
       cstate->out_n++;
       *op0 = *op1;
       PopOp(cstate);
+      return 2;
     }
   }
 
@@ -3987,9 +3990,23 @@ exit:
   unget_token();			/* the full-stop or punctuation */
   if ( !modify_prefix_infix_ia(&cstate PASS_LD) )
     return FALSE;
-  if ( !modify_op(&cstate, maxpri PASS_LD) )
-    return FALSE;
   DEBUG(MSG_READ_OP, trap_gdb());
+  { int rc;
+
+    if ( !(rc=modify_op(&cstate, maxpri PASS_LD)) )
+      return FALSE;
+    if ( rc > 1 )				/* last op transformed to atom */
+    { if ( !(rc=modify_prefix_infix_pa(&cstate PASS_LD)) )
+	return FALSE;
+      if ( rc > 1 )			/* <prefix> <infix> <atom> */
+      { term_t *av = term_av(-2, _PL_rd);
+	term_t t = av[0];
+	assert(cstate.out_n >= 2);
+	av[0] = av[1];
+	av[1] = t;
+      }
+    }
+  }
   if ( !reduce_op(&cstate, maxpri PASS_LD) )
     return FALSE;
 
