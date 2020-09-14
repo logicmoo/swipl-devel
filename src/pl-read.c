@@ -3643,6 +3643,38 @@ can_reduce(op_entry *op, short cpri, int out_n, ReadData _PL_rd)
 
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+If we find <prefix> <infix> <operant>, we must modify the prefix op to
+be an atom
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+
+static int
+modify_prefix_infix(cterm_state *cstate ARG_LD)
+{ if ( cstate->side_n >= 2 && cstate->rmo == 0 )
+  { ReadData _PL_rd = cstate->rd;
+    op_entry *op0 = SideOp(cstate->side_p-1);
+    op_entry *op1 = SideOp(cstate->side_p);
+
+    if ( op1->kind == OP_INFIX && op0->kind == OP_PREFIX && !op0->isblock )
+    { term_t tmp;
+
+      DEBUG(MSG_READ_OP, Sdprintf("Prefix %s before infix %s to atom",
+				  stringOp(op0), stringOp(op1)));
+      cstate->rmo++;
+      if ( !(tmp = alloc_term(_PL_rd PASS_LD)) )
+	return FALSE;
+      PL_put_atom(tmp, op0->op.atom);
+      queue_out_op(0, op0->tpos, _PL_rd);
+      cstate->out_n++;
+      *op0 = *op1;
+      PopOp(cstate);
+    }
+  }
+
+  return TRUE;
+}
+
+
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 Combine operators from the side queue and out queue as long as there are
 sufficient operators and operands and the   priority  of the operator is
 lower or equal to the context.
@@ -3659,6 +3691,8 @@ reduce_op(cterm_state *cstate, int cpri ARG_LD)
 	 cpri >= SideOp(cstate->side_p)->op_pri )
   { int rc;
 
+    if ( !modify_prefix_infix(cstate PASS_LD) )
+      return FALSE;
     rc = can_reduce(SideOp(cstate->side_p), cpri, cstate->out_n, cstate->rd);
     if ( rc > 0 )
     { if ( !build_op_term(SideOp(cstate->side_p), cstate->rd PASS_LD) )
@@ -3889,8 +3923,8 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	{ if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
 	    return FALSE;
 	  cstate.rmo--;
-	  goto push_op;
 	}
+	goto push_op;
       }
       if ( isOp(&in_op, OP_POSTFIX, _PL_rd PASS_LD) )
       { DEBUG(MSG_READ_OP, Sdprintf("Postfix op: %s\n", stringOp(&in_op)));
