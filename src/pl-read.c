@@ -3658,7 +3658,7 @@ modify_prefix_infix(cterm_state *cstate ARG_LD)
     { term_t tmp;
       op_entry *op0 = SideOp(cstate->side_p-1);
 
-      DEBUG(MSG_READ_OP, Sdprintf("Prefix %s before infix %s to atom",
+      DEBUG(MSG_READ_OP, Sdprintf("Prefix %s before infix %s to atom\n",
 				  stringOp(op0), stringOp(op1)));
       if ( !(tmp = alloc_term(_PL_rd PASS_LD)) )
 	return FALSE;
@@ -3939,10 +3939,10 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	  goto push_op;
 	}
       }
-    } else if ( rc == FALSE )		/* non-op value */
-    { if ( !modify_prefix_infix(&cstate PASS_LD) )
-	return FALSE;
     } else if ( rc < 0 )
+      return FALSE;
+
+    if ( !modify_prefix_infix(&cstate PASS_LD) )
       return FALSE;
 
     if ( cstate.rmo == 1 )
