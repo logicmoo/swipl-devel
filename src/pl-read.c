@@ -327,6 +327,7 @@ typedef struct
   } op;				/* Name of the operator */
   unsigned isblock : 1;		/* [...] or {...} operator */
   unsigned isterm : 1;		/* Union is a term */
+  unsigned infix_after_prefix:1;/* Is an infix operator pushed after a prefix */
   char	kind;			/* kind (prefix/postfix/infix) */
   short	left_pri;		/* priority at left-hand */
   short	right_pri;		/* priority at right hand */
@@ -3649,17 +3650,16 @@ be an atom
 
 static int
 modify_prefix_infix(cterm_state *cstate ARG_LD)
-{ if ( cstate->side_n >= 2 && cstate->rmo == 0 )
+{ if ( cstate->side_n >= 2 )
   { ReadData _PL_rd = cstate->rd;
-    op_entry *op0 = SideOp(cstate->side_p-1);
     op_entry *op1 = SideOp(cstate->side_p);
 
-    if ( op1->kind == OP_INFIX && op0->kind == OP_PREFIX && !op0->isblock )
+    if ( op1->infix_after_prefix )
     { term_t tmp;
+      op_entry *op0 = SideOp(cstate->side_p-1);
 
       DEBUG(MSG_READ_OP, Sdprintf("Prefix %s before infix %s to atom",
 				  stringOp(op0), stringOp(op1)));
-      cstate->rmo++;
       if ( !(tmp = alloc_term(_PL_rd PASS_LD)) )
 	return FALSE;
       PL_put_atom(tmp, op0->op.atom);
@@ -3691,8 +3691,6 @@ reduce_op(cterm_state *cstate, int cpri ARG_LD)
 	 cpri >= SideOp(cstate->side_p)->op_pri )
   { int rc;
 
-    if ( !modify_prefix_infix(cstate PASS_LD) )
-      return FALSE;
     rc = can_reduce(SideOp(cstate->side_p), cpri, cstate->out_n, cstate->rd);
     if ( rc > 0 )
     { if ( !build_op_term(SideOp(cstate->side_p), cstate->rd PASS_LD) )
@@ -3882,8 +3880,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
     }
 
     if ( (rc=is_name_token(token, cstate.rmo == 1, _PL_rd)) == TRUE )
-    { in_op.isblock     = FALSE;
-      in_op.isterm      = FALSE;
+    { memset(&in_op, 0, sizeof(in_op));
       in_op.op.atom     = name_token(token, &in_op, _PL_rd);
       in_op.tpos        = pin;
       in_op.token_start = last_token_start;
@@ -3923,8 +3920,13 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	{ if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
 	    return FALSE;
 	  cstate.rmo--;
+	  goto push_op;
+	} else if ( cstate.side_n > 0 &&
+		    SideOp(cstate.side_p)->kind == OP_PREFIX)
+	{ DEBUG(MSG_READ_OP, Sdprintf("Pushing infix after prefix\n"));
+	  in_op.infix_after_prefix = TRUE;
+	  goto push_op;
 	}
-	goto push_op;
       }
       if ( isOp(&in_op, OP_POSTFIX, _PL_rd PASS_LD) )
       { DEBUG(MSG_READ_OP, Sdprintf("Postfix op: %s\n", stringOp(&in_op)));
@@ -3937,6 +3939,9 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	  goto push_op;
 	}
       }
+    } else if ( rc == FALSE )		/* non-op value */
+    { if ( !modify_prefix_infix(&cstate PASS_LD) )
+	return FALSE;
     } else if ( rc < 0 )
       return FALSE;
 
@@ -3959,6 +3964,7 @@ exit:
   unget_token();			/* the full-stop or punctuation */
   if ( !modify_op(&cstate, maxpri PASS_LD) )
     return FALSE;
+  DEBUG(MSG_READ_OP, trap_gdb());
   if ( !reduce_op(&cstate, maxpri PASS_LD) )
     return FALSE;
 
