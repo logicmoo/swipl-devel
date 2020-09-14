@@ -3537,7 +3537,7 @@ modify_op(cterm_state *cstate, int cpri ARG_LD)
     if ( op->kind == OP_PREFIX && !op->isblock )
     { term_t tmp;
 
-      DEBUG(MSG_READ_OP, Sdprintf("Prefix %s to atom", stringOp(op)));
+      DEBUG(MSG_READ_OP, Sdprintf("Prefix %s to atom\n", stringOp(op)));
       cstate->rmo++;
       if ( !(tmp = alloc_term(_PL_rd PASS_LD)) )
 	return FALSE;
@@ -3547,8 +3547,7 @@ modify_op(cterm_state *cstate, int cpri ARG_LD)
       PopOp(cstate);
     } else if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
 		isOp(op, OP_POSTFIX, _PL_rd PASS_LD) )
-    { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfixn",
-				  stringOp(op)));
+    { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfix\n", stringOp(op)));
       cstate->rmo++;
       if ( !build_op_term(op, _PL_rd PASS_LD) )
 	return FALSE;
@@ -3649,7 +3648,7 @@ be an atom
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 static int
-modify_prefix_infix(cterm_state *cstate ARG_LD)
+modify_prefix_infix_pa(cterm_state *cstate ARG_LD)
 { if ( cstate->side_n >= 2 )
   { ReadData _PL_rd = cstate->rd;
     op_entry *op1 = SideOp(cstate->side_p);
@@ -3672,6 +3671,30 @@ modify_prefix_infix(cterm_state *cstate ARG_LD)
 
   return TRUE;
 }
+
+
+static int
+modify_prefix_infix_ia(cterm_state *cstate ARG_LD)
+{ if ( cstate->side_n >= 2 )
+  { ReadData _PL_rd = cstate->rd;
+    op_entry *op = SideOp(cstate->side_p);
+
+    if ( op->infix_after_prefix )
+    { term_t tmp;
+
+      if ( !(tmp = alloc_term(_PL_rd PASS_LD)) )
+	return FALSE;
+      PL_put_atom(tmp, op->op.atom);
+      queue_out_op(0, op->tpos, _PL_rd);
+      cstate->out_n++;
+      PopOp(cstate);
+      cstate->rmo++;
+    }
+  }
+
+  return TRUE;
+}
+
 
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -3942,7 +3965,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
     } else if ( rc < 0 )
       return FALSE;
 
-    if ( !modify_prefix_infix(&cstate PASS_LD) )
+    if ( !modify_prefix_infix_pa(&cstate PASS_LD) )
       return FALSE;
 
     if ( cstate.rmo == 1 )
@@ -3962,6 +3985,8 @@ complex_term(const char *stop, short maxpri, term_t positions,
 
 exit:
   unget_token();			/* the full-stop or punctuation */
+  if ( !modify_prefix_infix_ia(&cstate PASS_LD) )
+    return FALSE;
   if ( !modify_op(&cstate, maxpri PASS_LD) )
     return FALSE;
   DEBUG(MSG_READ_OP, trap_gdb());
