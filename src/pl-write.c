@@ -1628,7 +1628,6 @@ writeTerm2(term_t t, int prec, write_options *options, bool arg)
 	if ( currentOperator(options->module, functor, OP_INFIX,
 			     &op_type, &op_pri) )
 	{ static atom_t ATOM_fdot = 0;
-	  atom_t left;
 
 	  if ( !ATOM_fdot )			/* ATOM_dot can be '[|]' */
 	    ATOM_fdot = PL_new_atom(".");
@@ -1636,14 +1635,10 @@ writeTerm2(term_t t, int prec, write_options *options, bool arg)
 	  if ( op_pri > prec )
 	    TRY(PutOpenBrace(out));
 	  _PL_get_arg(arity-1, t, arg);
-	  if ( PL_get_atom(arg, &left) )	/* atom infix never needs () */
-	  { TRY(writeAtom(left, options));
-	  } else
-	  { TRY(writeTerm(arg,
-			  op_type == OP_XFX || op_type == OP_XFY
-				  ? op_pri-1 : op_pri,
-			  options));
-	  }
+	  TRY(writeTerm(arg,
+			op_type == OP_XFX || op_type == OP_XFY
+				? op_pri-1 : op_pri,
+			options));
 	  if ( arity == 2 )
 	  { if ( functor == ATOM_comma )
 	    { TRY(PutComma(options));
