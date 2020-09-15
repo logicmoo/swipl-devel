@@ -327,11 +327,12 @@ typedef struct
   } op;				/* Name of the operator */
   unsigned isblock : 1;		/* [...] or {...} operator */
   unsigned isterm : 1;		/* Union is a term */
-  unsigned infix_after_prefix:1;/* Is an infix operator pushed after a prefix */
+  unsigned consecutive : 1;	/* op follows previous op immediately  */
   char	kind;			/* kind (prefix/postfix/infix) */
   short	left_pri;		/* priority at left-hand */
   short	right_pri;		/* priority at right hand */
   short	op_pri;			/* priority of operator */
+  int	tokn;			/* Token index for operator */
   term_t tpos;			/* term-position */
   unsigned char *token_start;	/* start of the token for message */
 } op_entry;
@@ -3490,6 +3491,7 @@ typedef struct cterm_state
   int		side_n;			/* entries in side queue */
   int		side_p;			/* top (index) of side queue */
   int		rmo;			/* Operands more than operators */
+  int		tokn;			/* Token index for operators */
 } cterm_state;
 
 static bool
@@ -3645,17 +3647,17 @@ can_reduce(op_entry *op, short cpri, int out_n, ReadData _PL_rd)
 
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-If we find <prefix> <infix> <operant>, we must modify the prefix op to
-be an atom
+If we find <op> <infix> <operant>, we must   modify  <op> to be an atom.
+This is called when we find a non-operator argument.
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 static int
-modify_prefix_infix_pa(cterm_state *cstate ARG_LD)
+modify_op_infix_arg(cterm_state *cstate ARG_LD)
 { if ( cstate->side_n >= 2 )
   { ReadData _PL_rd = cstate->rd;
     op_entry *op1 = SideOp(cstate->side_p);
 
-    if ( op1->infix_after_prefix )
+    if ( op1->consecutive )
     { term_t tmp;
       op_entry *op0 = SideOp(cstate->side_p-1);
 
@@ -3676,13 +3678,17 @@ modify_prefix_infix_pa(cterm_state *cstate ARG_LD)
 }
 
 
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+We got end-of-term.  Check the operator stack for required changes.
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+
 static int
-modify_prefix_infix_ia(cterm_state *cstate ARG_LD)
+modify_op_infix_end(cterm_state *cstate ARG_LD)
 { if ( cstate->side_n >= 2 )
   { ReadData _PL_rd = cstate->rd;
     op_entry *op = SideOp(cstate->side_p);
 
-    if ( op->infix_after_prefix )
+    if ( op->consecutive )
     { term_t tmp;
 
       if ( !(tmp = alloc_term(_PL_rd PASS_LD)) )
@@ -3866,7 +3872,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
   { .rd = _PL_rd,
     .out_n = 0,
     .side_n = 0, .side_p = side_p0(_PL_rd),
-    .rmo = 0
+    .rmo = 0, .tokn = 0
   };
 
   if ( _PL_rd->strictness == 0 )
@@ -3885,6 +3891,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
 
     if ( !(token = get_token(cstate.rmo == 1, _PL_rd)) )
       return FALSE;
+    cstate.tokn++;
 
     if ( cstate.out_n != 0 || cstate.side_n != 0 ) /* Check for end of term */
     { switch(token->type)
@@ -3910,6 +3917,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
       in_op.op.atom     = name_token(token, &in_op, _PL_rd);
       in_op.tpos        = pin;
       in_op.token_start = last_token_start;
+      in_op.tokn        = cstate.tokn;
 
       DEBUG(MSG_READ_OP, Sdprintf("name %s, rmo = %d\n",
 				  stringOp(&in_op), cstate.rmo));
@@ -3938,19 +3946,24 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	continue;
       }
       if ( isOp(&in_op, OP_INFIX, _PL_rd PASS_LD) )
-      { DEBUG(MSG_READ_OP, Sdprintf("Infix op: %s\n", stringOp(&in_op)));
+      { op_entry *prev;
+
+	DEBUG(MSG_READ_OP, Sdprintf("Infix op: %s\n", stringOp(&in_op)));
 
 	if ( !modify_op(&cstate, in_op.left_pri PASS_LD) )
 	  return FALSE;
+
 	if ( cstate.rmo == 1 )
 	{ if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
 	    return FALSE;
 	  cstate.rmo--;
 	  goto push_op;
 	} else if ( cstate.side_n > 0 &&
-		    SideOp(cstate.side_p)->kind == OP_PREFIX)
+		    (prev=SideOp(cstate.side_p)) &&
+		    prev->tokn+1 == in_op.tokn &&
+		    prev->kind == OP_PREFIX)
 	{ DEBUG(MSG_READ_OP, Sdprintf("Pushing infix after prefix\n"));
-	  in_op.infix_after_prefix = TRUE;
+	  in_op.consecutive = TRUE;
 	  goto push_op;
 	}
       }
@@ -3968,7 +3981,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
     } else if ( rc < 0 )
       return FALSE;
 
-    if ( !modify_prefix_infix_pa(&cstate PASS_LD) )
+    if ( !modify_op_infix_arg(&cstate PASS_LD) )
       return FALSE;
 
     if ( cstate.rmo == 1 )
@@ -3988,7 +4001,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
 
 exit:
   unget_token();			/* the full-stop or punctuation */
-  if ( !modify_prefix_infix_ia(&cstate PASS_LD) )
+  if ( !modify_op_infix_end(&cstate PASS_LD) )
     return FALSE;
   DEBUG(MSG_READ_OP, trap_gdb());
   { int rc;
@@ -3996,7 +4009,7 @@ exit:
     if ( !(rc=modify_op(&cstate, maxpri PASS_LD)) )
       return FALSE;
     if ( rc > 1 )				/* last op transformed to atom */
-    { if ( !(rc=modify_prefix_infix_pa(&cstate PASS_LD)) )
+    { if ( !(rc=modify_op_infix_arg(&cstate PASS_LD)) )
 	return FALSE;
       if ( rc > 1 )			/* <prefix> <infix> <atom> */
       { term_t *av = term_av(-2, _PL_rd);
