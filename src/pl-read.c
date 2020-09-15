@@ -3696,6 +3696,7 @@ Patterns:
 
   <prefix> <infix>	--> map <infix> to atom
   <op> <infix> <op>	--> map both <op> to atom
+  <arg> <infix> <op>	--> map <op> to atom
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 static int
@@ -3723,6 +3724,12 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
 	*op = *prev;
 	PopOp(cstate);
 	PopOp(cstate);
+      } if ( cstate->out_n > 0 &&
+	     prev->kind == OP_INFIX )
+      { if ( !op_to_out(cstate, op PASS_LD) )
+	  return FALSE;
+	PopOp(cstate);
+	cstate->rmo++;
       }
     }
   }
@@ -3948,7 +3955,8 @@ complex_term(const char *stop, short maxpri, term_t positions,
 				  stringOp(&in_op), cstate.rmo));
 
       if ( cstate.rmo == 0 && isOp(&in_op, OP_PREFIX, _PL_rd PASS_LD) )
-      { DEBUG(MSG_READ_OP, Sdprintf("Prefix op: %s\n", stringOp(&in_op)));
+      { op_entry *prev;
+	DEBUG(MSG_READ_OP, Sdprintf("Prefix op: %s\n", stringOp(&in_op)));
 
       push_op:
 	Unlock(in_op.op.atom);		/* ok; part of an operator */
@@ -3966,6 +3974,14 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	{ if ( !unify_atomic_position(pin, token PASS_LD) )
 	    return FALSE;
 	}
+
+/*
+	if ( cstate.side_n > 0 &&
+	     (prev=SideOp(cstate.side_p)) &&
+	     prev->tokn+1 == in_op.tokn )
+	  in_op.consecutive = TRUE;
+*/
+
 	PushOp();
 
 	continue;
@@ -3986,9 +4002,8 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	} else if ( cstate.side_n > 0 &&
 		    (prev=SideOp(cstate.side_p)) &&
 		    prev->tokn+1 == in_op.tokn &&
-		    prev->kind == OP_PREFIX)
+		    (prev->kind == OP_PREFIX || prev->kind == OP_INFIX) )
 	{ DEBUG(MSG_READ_OP, Sdprintf("Pushing infix after prefix\n"));
-	  in_op.consecutive = TRUE;
 	  goto push_op;
 	}
       }
@@ -4026,25 +4041,9 @@ complex_term(const char *stop, short maxpri, term_t positions,
 
 exit:
   unget_token();			/* the full-stop or punctuation */
+  DEBUG(MSG_READ_OP, trap_gdb());
   if ( !modify_op_infix_end(&cstate PASS_LD) )
     return FALSE;
-  DEBUG(MSG_READ_OP, trap_gdb());
-  { int rc;
-
-    if ( !(rc=modify_op(&cstate, maxpri PASS_LD)) )
-      return FALSE;
-    if ( rc > 1 )				/* last op transformed to atom */
-    { if ( !(rc=modify_op_infix_arg(&cstate PASS_LD)) )
-	return FALSE;
-      if ( rc > 1 )			/* <prefix> <infix> <atom> */
-      { term_t *av = term_av(-2, _PL_rd);
-	term_t t = av[0];
-	assert(cstate.out_n >= 2);
-	av[0] = av[1];
-	av[1] = t;
-      }
-    }
-  }
   if ( !reduce_op(&cstate, maxpri PASS_LD) )
     return FALSE;
 
