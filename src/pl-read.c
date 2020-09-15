@@ -3709,31 +3709,29 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
     op_entry *op   = SideOp(cstate->side_p);
     op_entry *first;
 
-    if ( prev->convertible )
-    { if ( op->kind == OP_INFIX && prev->kind == OP_PREFIX )
-      { if ( !op_to_out(cstate, op PASS_LD) )
-	  return FALSE;
-	PopOp(cstate);
-	cstate->rmo++;
-      } else if ( cstate->side_n >= 3 &&
-		  prev->kind == OP_INFIX &&
-		  op->convertible &&
-		  (first = SideOp(cstate->side_p-2)) &&
-		  first->convertible )
-      { if ( !op_to_out(cstate, first PASS_LD) ||
-	     !op_to_out(cstate, op PASS_LD) )
-	  return FALSE;
-	*op = *prev;
-	PopOp(cstate);
-	PopOp(cstate);
-      } if ( cstate->out_n > 0 &&
-	     op->convertible &&
-	     prev->kind == OP_INFIX )
-      { if ( !op_to_out(cstate, op PASS_LD) )
-	  return FALSE;
-	PopOp(cstate);
-	cstate->rmo++;
-      }
+    if ( op->convertible && op->kind == OP_INFIX && prev->kind == OP_PREFIX )
+    { if ( !op_to_out(cstate, op PASS_LD) )
+	return FALSE;
+      PopOp(cstate);
+      cstate->rmo++;
+    } else if ( cstate->side_n >= 3 &&
+		prev->kind == OP_INFIX &&
+		op->convertible &&
+		(first = SideOp(cstate->side_p-2)) &&
+		first->convertible )
+    { if ( !op_to_out(cstate, first PASS_LD) ||
+	   !op_to_out(cstate, op PASS_LD) )
+	return FALSE;
+      *op = *prev;
+      PopOp(cstate);
+      PopOp(cstate);
+    } if ( cstate->out_n > 0 &&
+	   op->convertible &&
+	   prev->kind == OP_INFIX )
+    { if ( !op_to_out(cstate, op PASS_LD) )
+	return FALSE;
+      PopOp(cstate);
+      cstate->rmo++;
     }
   }
 
@@ -3947,6 +3945,14 @@ complex_term(const char *stop, short maxpri, term_t positions,
       }
     }
 
+    if ( cstate.side_n > 0 )
+    { op_entry *e = SideOp(cstate.side_p);
+      if ( e->convertible )
+      { DEBUG(MSG_READ_OP, Sdprintf("Drop convertible for %s", stringOp(e)));
+	e->convertible = FALSE;
+      }
+    }
+
     if ( (rc=is_name_token(token, cstate.rmo == 1, _PL_rd)) == TRUE )
     { memset(&in_op, 0, sizeof(in_op));
       in_op.op.atom     = name_token(token, &in_op, _PL_rd);
@@ -3977,6 +3983,10 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	{ if ( !unify_atomic_position(pin, token PASS_LD) )
 	    return FALSE;
 	}
+
+	if ( in_op.convertible )
+	  DEBUG(MSG_READ_OP, Sdprintf("Set convertible for %s",
+				      stringOp(&in_op)));
 
 	PushOp();
 	continue;
