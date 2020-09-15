@@ -3646,6 +3646,24 @@ can_reduce(op_entry *op, short cpri, int out_n, ReadData _PL_rd)
 }
 
 
+static int
+op_to_out(cterm_state *cstate, op_entry *op ARG_LD)
+{ term_t tmp;
+
+  DEBUG(MSG_READ_OP, Sdprintf("%s %s to atom\n",
+			      op->kind == OP_PREFIX ? "Prefix" :
+			      op->kind == OP_INFIX ? "Infix" : "Postfix",
+			      stringOp(op)));
+
+  if ( !(tmp = alloc_term(cstate->rd PASS_LD)) )
+    return FALSE;
+  PL_put_atom(tmp, op->op.atom);
+  queue_out_op(0, op->tpos, cstate->rd);
+  cstate->out_n++;
+
+  return TRUE;
+}
+
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 If we find <op> <infix> <operant>, we must   modify  <op> to be an atom.
 This is called when we find a non-operator argument.
@@ -3658,16 +3676,10 @@ modify_op_infix_arg(cterm_state *cstate ARG_LD)
     op_entry *op1 = SideOp(cstate->side_p);
 
     if ( op1->consecutive )
-    { term_t tmp;
-      op_entry *op0 = SideOp(cstate->side_p-1);
+    { op_entry *op0 = SideOp(cstate->side_p-1);
 
-      DEBUG(MSG_READ_OP, Sdprintf("Prefix %s before infix %s to atom\n",
-				  stringOp(op0), stringOp(op1)));
-      if ( !(tmp = alloc_term(_PL_rd PASS_LD)) )
+      if ( !op_to_out(cstate, op0 PASS_LD) )
 	return FALSE;
-      PL_put_atom(tmp, op0->op.atom);
-      queue_out_op(0, op0->tpos, _PL_rd);
-      cstate->out_n++;
       *op0 = *op1;
       PopOp(cstate);
       return 2;
@@ -3679,7 +3691,11 @@ modify_op_infix_arg(cterm_state *cstate ARG_LD)
 
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-We got end-of-term.  Check the operator stack for required changes.
+We got end-of-term. Check  the  operator   stack  for  required changes.
+Patterns:
+
+  <prefix> <infix>	--> map <infix> to atom
+  <op> <infix> <op>	--> map both <op> to atom
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 static int
@@ -3689,21 +3705,30 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
     op_entry *op = SideOp(cstate->side_p);
 
     if ( op->consecutive )
-    { term_t tmp;
+    { op_entry *prev = SideOp(cstate->side_p-1);
 
-      if ( !(tmp = alloc_term(_PL_rd PASS_LD)) )
-	return FALSE;
-      PL_put_atom(tmp, op->op.atom);
-      queue_out_op(0, op->tpos, _PL_rd);
-      cstate->out_n++;
-      PopOp(cstate);
-      cstate->rmo++;
+      if ( op->kind == OP_INFIX && prev->kind == OP_PREFIX )
+      { if ( !op_to_out(cstate, op PASS_LD) )
+	  return FALSE;
+	PopOp(cstate);
+	cstate->rmo++;
+      } else if ( cstate->side_n >= 3 &&
+		  prev->kind == OP_INFIX &&
+		  prev->consecutive )
+      { op_entry *first = SideOp(cstate->side_p-2);
+
+	if ( !op_to_out(cstate, first PASS_LD) ||
+	     !op_to_out(cstate, op PASS_LD) )
+	  return FALSE;
+	*op = *prev;
+	PopOp(cstate);
+	PopOp(cstate);
+      }
     }
   }
 
   return TRUE;
 }
-
 
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
