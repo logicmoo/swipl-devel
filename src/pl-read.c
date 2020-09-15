@@ -327,7 +327,7 @@ typedef struct
   } op;				/* Name of the operator */
   unsigned isblock : 1;		/* [...] or {...} operator */
   unsigned isterm : 1;		/* Union is a term */
-  unsigned consecutive : 1;	/* op follows previous op immediately  */
+  unsigned convertible : 1;	/* Op can be converted to atom */
   char	kind;			/* kind (prefix/postfix/infix) */
   short	left_pri;		/* priority at left-hand */
   short	right_pri;		/* priority at right hand */
@@ -3671,20 +3671,22 @@ This is called when we find a non-operator argument.
 
 static int
 modify_op_infix_arg(cterm_state *cstate ARG_LD)
-{ if ( cstate->side_n >= 2 )
-  { ReadData _PL_rd = cstate->rd;
-    op_entry *op1 = SideOp(cstate->side_p);
+{ ReadData _PL_rd = cstate->rd;
+  op_entry *op1 = SideOp(cstate->side_p);
 
-    if ( op1->consecutive )
-    { op_entry *op0 = SideOp(cstate->side_p-1);
+  if ( cstate->side_n >= 2 )
+  { op_entry *op0 = SideOp(cstate->side_p-1);
 
-      if ( !op_to_out(cstate, op0 PASS_LD) )
+    if ( op0->convertible )
+    { if ( !op_to_out(cstate, op0 PASS_LD) )
 	return FALSE;
       *op0 = *op1;
       PopOp(cstate);
       return 2;
     }
   }
+
+  op1->convertible = FALSE;
 
   return TRUE;
 }
@@ -3703,28 +3705,29 @@ static int
 modify_op_infix_end(cterm_state *cstate ARG_LD)
 { if ( cstate->side_n >= 2 )
   { ReadData _PL_rd = cstate->rd;
-    op_entry *op = SideOp(cstate->side_p);
+    op_entry *prev = SideOp(cstate->side_p-1);
+    op_entry *op   = SideOp(cstate->side_p);
+    op_entry *first;
 
-    if ( op->consecutive )
-    { op_entry *prev = SideOp(cstate->side_p-1);
-
-      if ( op->kind == OP_INFIX && prev->kind == OP_PREFIX )
+    if ( prev->convertible )
+    { if ( op->kind == OP_INFIX && prev->kind == OP_PREFIX )
       { if ( !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
 	PopOp(cstate);
 	cstate->rmo++;
       } else if ( cstate->side_n >= 3 &&
 		  prev->kind == OP_INFIX &&
-		  prev->consecutive )
-      { op_entry *first = SideOp(cstate->side_p-2);
-
-	if ( !op_to_out(cstate, first PASS_LD) ||
+		  op->convertible &&
+		  (first = SideOp(cstate->side_p-2)) &&
+		  first->convertible )
+      { if ( !op_to_out(cstate, first PASS_LD) ||
 	     !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
 	*op = *prev;
 	PopOp(cstate);
 	PopOp(cstate);
       } if ( cstate->out_n > 0 &&
+	     op->convertible &&
 	     prev->kind == OP_INFIX )
       { if ( !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
@@ -3882,7 +3885,7 @@ the top element(s) on the out queue as   long as the side queue operator
 has lower priority than the  reduce   context.  The  resulting terms are
 pushed on the out stack.
 
-Prolog  cannot  have  two  consequetive  operands.  This  constraint  it
+Prolog  cannot  have  two  consecutive   operands.  This  constraint  it
 maintained in `rmo`, (Ope)rands-more-then-operators.  This cannot become
 more than 1 and thus, if we get into a situation where this threatens to
 become two, we try to interpret the next   token as an operator, even if
@@ -3955,8 +3958,8 @@ complex_term(const char *stop, short maxpri, term_t positions,
 				  stringOp(&in_op), cstate.rmo));
 
       if ( cstate.rmo == 0 && isOp(&in_op, OP_PREFIX, _PL_rd PASS_LD) )
-      { op_entry *prev;
-	DEBUG(MSG_READ_OP, Sdprintf("Prefix op: %s\n", stringOp(&in_op)));
+      { DEBUG(MSG_READ_OP, Sdprintf("Prefix op: %s\n", stringOp(&in_op)));
+	in_op.convertible = TRUE;
 
       push_op:
 	Unlock(in_op.op.atom);		/* ok; part of an operator */
@@ -3975,15 +3978,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	    return FALSE;
 	}
 
-/*
-	if ( cstate.side_n > 0 &&
-	     (prev=SideOp(cstate.side_p)) &&
-	     prev->tokn+1 == in_op.tokn )
-	  in_op.consecutive = TRUE;
-*/
-
 	PushOp();
-
 	continue;
       }
       if ( isOp(&in_op, OP_INFIX, _PL_rd PASS_LD) )
@@ -4004,6 +3999,8 @@ complex_term(const char *stop, short maxpri, term_t positions,
 		    prev->tokn+1 == in_op.tokn &&
 		    (prev->kind == OP_PREFIX || prev->kind == OP_INFIX) )
 	{ DEBUG(MSG_READ_OP, Sdprintf("Pushing infix after prefix\n"));
+	  prev->convertible = TRUE;
+	  in_op.convertible = TRUE;
 	  goto push_op;
 	}
       }
