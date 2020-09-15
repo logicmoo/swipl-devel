@@ -3703,35 +3703,62 @@ Patterns:
 
 static int
 modify_op_infix_end(cterm_state *cstate ARG_LD)
-{ if ( cstate->side_n >= 2 )
+{ if ( cstate->side_n >= 1 )
   { ReadData _PL_rd = cstate->rd;
-    op_entry *prev = SideOp(cstate->side_p-1);
     op_entry *op   = SideOp(cstate->side_p);
-    op_entry *first;
 
-    if ( op->convertible && op->kind == OP_INFIX && prev->kind == OP_PREFIX )
-    { if ( !op_to_out(cstate, op PASS_LD) )
-	return FALSE;
-      PopOp(cstate);
-      cstate->rmo++;
-    } else if ( cstate->side_n >= 3 &&
-		prev->kind == OP_INFIX &&
-		op->convertible &&
-		(first = SideOp(cstate->side_p-2)) &&
-		first->convertible )
-    { if ( !op_to_out(cstate, first PASS_LD) ||
-	   !op_to_out(cstate, op PASS_LD) )
-	return FALSE;
-      *op = *prev;
-      PopOp(cstate);
-      PopOp(cstate);
-    } if ( cstate->out_n > 0 &&
+    if ( cstate->side_n >= 2 )
+    { op_entry *prev = SideOp(cstate->side_p-1);
+      op_entry *first;
+
+      op   = SideOp(cstate->side_p);
+      if ( op->convertible && op->kind == OP_INFIX && prev->kind == OP_PREFIX )
+      { if ( !op_to_out(cstate, op PASS_LD) )
+	  return FALSE;
+	PopOp(cstate);
+	cstate->rmo++;
+
+	return TRUE;
+      }
+
+      if ( cstate->side_n >= 3 &&
+	   prev->kind == OP_INFIX &&
+	   op->convertible &&
+	   (first = SideOp(cstate->side_p-2)) &&
+	   first->convertible )
+      { if ( !op_to_out(cstate, first PASS_LD) ||
+	     !op_to_out(cstate, op PASS_LD) )
+	  return FALSE;
+	*op = *prev;
+	PopOp(cstate);
+	PopOp(cstate);
+
+	return TRUE;
+      }
+
+      if ( cstate->out_n > 0 &&
 	   op->convertible &&
 	   prev->kind == OP_INFIX )
-    { if ( !op_to_out(cstate, op PASS_LD) )
+      { if ( !op_to_out(cstate, op PASS_LD) )
+	  return FALSE;
+	PopOp(cstate);
+	cstate->rmo++;
+
+	return TRUE;
+      }
+    }
+
+    if ( cstate->out_n > 0 &&
+	 op->kind == OP_INFIX &&
+	 isOp(op, OP_POSTFIX, cstate->rd PASS_LD) )
+    { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfix\n", \
+				  stringOp(op)));
+      cstate->rmo++;
+      if ( !build_op_term(op, cstate->rd PASS_LD) )
 	return FALSE;
       PopOp(cstate);
-      cstate->rmo++;
+
+      return TRUE;
     }
   }
 
