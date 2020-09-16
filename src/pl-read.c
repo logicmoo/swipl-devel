@@ -3532,6 +3532,10 @@ isOp(op_entry *e, int kind, ReadData _PL_rd ARG_LD)
 #define SideOp(i) \
 	side_op(i, _PL_rd)
 
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+About to add an operator that demands =< cpri on its left side.
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+
 static int
 modify_op(cterm_state *cstate, int cpri ARG_LD)
 { ReadData _PL_rd = cstate->rd;
@@ -3540,7 +3544,7 @@ modify_op(cterm_state *cstate, int cpri ARG_LD)
   if ( cstate->side_n > 0 && cstate->rmo == 0 &&
        cpri > (op=SideOp(cstate->side_p))->right_pri )
   { if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
-		isOp(op, OP_POSTFIX, _PL_rd PASS_LD) )
+	 isOp(op, OP_POSTFIX, _PL_rd PASS_LD) )
     { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfix\n", stringOp(op)));
       cstate->rmo++;
       if ( !build_op_term(op, _PL_rd PASS_LD) )
