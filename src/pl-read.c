@@ -3520,6 +3520,9 @@ isOp(op_entry *e, int kind, ReadData _PL_rd ARG_LD)
 
 #define stringOp(e) \
 	stringAtom(op_name(e PASS_LD))
+#define kindOp(e) \
+	(e->kind == OP_PREFIX ? "prefix" : \
+         e->kind == OP_INFIX  ? "infix"  : "postfix")
 #define PushOp() \
 	queue_side_op(&in_op, _PL_rd); \
 	cstate.side_n++, cstate.side_p++;
@@ -3532,14 +3535,25 @@ isOp(op_entry *e, int kind, ReadData _PL_rd ARG_LD)
 static int
 modify_op(cterm_state *cstate, int cpri ARG_LD)
 { ReadData _PL_rd = cstate->rd;
+  op_entry *op;
 
   if ( cstate->side_n > 0 && cstate->rmo == 0 &&
-       cpri > SideOp(cstate->side_p)->right_pri )
-  { op_entry *op = SideOp(cstate->side_p);
-    if ( op->kind == OP_PREFIX && !op->isblock )
+       cpri > (op=SideOp(cstate->side_p))->right_pri )
+  { if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
+		isOp(op, OP_POSTFIX, _PL_rd PASS_LD) )
+    { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfix\n", stringOp(op)));
+      cstate->rmo++;
+      if ( !build_op_term(op, _PL_rd PASS_LD) )
+	return FALSE;
+      PopOp(cstate);
+
+      return TRUE;
+    }
+
+    if ( (op->kind == OP_PREFIX || op->kind == OP_INFIX) && !op->isblock )
     { term_t tmp;
 
-      DEBUG(MSG_READ_OP, Sdprintf("Prefix %s to atom\n", stringOp(op)));
+      DEBUG(MSG_READ_OP, Sdprintf("%s %s to atom\n", kindOp(op), stringOp(op)));
       cstate->rmo++;
       if ( !(tmp = alloc_term(_PL_rd PASS_LD)) )
 	return FALSE;
@@ -3547,15 +3561,8 @@ modify_op(cterm_state *cstate, int cpri ARG_LD)
       queue_out_op(0, op->tpos, _PL_rd);
       cstate->out_n++;
       PopOp(cstate);
-      return 2;
-    } else if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
-		isOp(op, OP_POSTFIX, _PL_rd PASS_LD) )
-    { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfix\n", stringOp(op)));
-      cstate->rmo++;
-      if ( !build_op_term(op, _PL_rd PASS_LD) )
-	return FALSE;
-      PopOp(cstate);
-      return 2;
+
+      return TRUE;
     }
   }
 
@@ -3976,7 +3983,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
     if ( cstate.side_n > 0 )
     { op_entry *e = SideOp(cstate.side_p);
       if ( e->convertible )
-      { DEBUG(MSG_READ_OP, Sdprintf("Drop convertible for %s", stringOp(e)));
+      { DEBUG(MSG_READ_OP, Sdprintf("Drop convertible for %s\n", stringOp(e)));
 	e->convertible = FALSE;
       }
     }
@@ -4013,7 +4020,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	}
 
 	if ( in_op.convertible )
-	  DEBUG(MSG_READ_OP, Sdprintf("Set convertible for %s",
+	  DEBUG(MSG_READ_OP, Sdprintf("Set convertible for %s\n",
 				      stringOp(&in_op)));
 
 	PushOp();
@@ -4036,7 +4043,11 @@ complex_term(const char *stop, short maxpri, term_t positions,
 		    (prev=SideOp(cstate.side_p)) &&
 		    prev->tokn+1 == in_op.tokn &&
 		    (prev->kind == OP_PREFIX || prev->kind == OP_INFIX) )
-	{ DEBUG(MSG_READ_OP, Sdprintf("Pushing infix after prefix\n"));
+	{ DEBUG(MSG_READ_OP,
+		Sdprintf("Pushing infix after %s "
+			 "(convertible: \"%s\" and \"%s\")\n",
+			 prev->kind == OP_PREFIX ? "prefix" : "infix",
+			 stringOp(prev), stringOp(&in_op)));
 	  prev->convertible = TRUE;
 	  in_op.convertible = TRUE;
 	  goto push_op;
