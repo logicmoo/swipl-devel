@@ -3533,41 +3533,68 @@ isOp(op_entry *e, int kind, ReadData _PL_rd ARG_LD)
 	side_op(i, _PL_rd)
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+Turn an operator into an operant (atom),   moving it from the side queue
+to the out queue.
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+
+static int
+op_to_out(cterm_state *cstate, op_entry *op ARG_LD)
+{ term_t tmp;
+
+  DEBUG(MSG_READ_OP, Sdprintf("%s %s to atom\n",
+			      op->kind == OP_PREFIX ? "Prefix" :
+			      op->kind == OP_INFIX ? "Infix" : "Postfix",
+			      stringOp(op)));
+
+  if ( !(tmp = alloc_term(cstate->rd PASS_LD)) )
+    return FALSE;
+  PL_put_atom(tmp, op->op.atom);
+  queue_out_op(0, op->tpos, cstate->rd);
+  cstate->out_n++;
+
+  return TRUE;
+}
+
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 About to add an operator that demands =< cpri on its left side.
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 static int
-modify_op(cterm_state *cstate, int cpri ARG_LD)
-{ ReadData _PL_rd = cstate->rd;
-  op_entry *op;
+modify_op(cterm_state *cstate, op_entry *e ARG_LD)
+{ if ( cstate->side_n > 0 )
+  { ReadData _PL_rd = cstate->rd;
+    op_entry *op = SideOp(cstate->side_p);
 
-  if ( cstate->side_n > 0 && cstate->rmo == 0 &&
-       cpri > (op=SideOp(cstate->side_p))->right_pri )
-  { if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
-	 isOp(op, OP_POSTFIX, _PL_rd PASS_LD) )
-    { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfix\n", stringOp(op)));
-      cstate->rmo++;
-      if ( !build_op_term(op, _PL_rd PASS_LD) )
-	return FALSE;
-      PopOp(cstate);
+    DEBUG(MSG_READ_OP, trap_gdb());
 
-      return TRUE;
+    if ( op->convertible && cstate->rmo == 0 && e->left_pri > op->right_pri )
+    { if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
+	   !(cstate->side_n > 1 && SideOp(cstate->side_p-1)->kind == OP_INFIX) &&
+	   isOp(op, OP_POSTFIX, _PL_rd PASS_LD) )
+      { DEBUG(MSG_READ_OP, Sdprintf("%s modifies %s to postfix\n",
+				    stringOp(e), stringOp(op)));
+	cstate->rmo++;
+	if ( !build_op_term(op, _PL_rd PASS_LD) )
+	  return FALSE;
+	PopOp(cstate);
+
+	return TRUE;
+      }
+
+      if ( (op->kind == OP_PREFIX || op->kind == OP_INFIX) && !op->isblock )
+      { DEBUG(MSG_READ_OP, Sdprintf("%s modifies %s %s to atom\n",
+				    stringOp(e), kindOp(op), stringOp(op)));
+	if ( !op_to_out(cstate, op PASS_LD) )
+	  return FALSE;
+	PopOp(cstate);
+	cstate->rmo++;
+
+	return TRUE;
+      }
     }
 
-    if ( (op->kind == OP_PREFIX || op->kind == OP_INFIX) && !op->isblock )
-    { term_t tmp;
-
-      DEBUG(MSG_READ_OP, Sdprintf("%s %s to atom\n", kindOp(op), stringOp(op)));
-      cstate->rmo++;
-      if ( !(tmp = alloc_term(_PL_rd PASS_LD)) )
-	return FALSE;
-      PL_put_atom(tmp, op->op.atom);
-      queue_out_op(0, op->tpos, _PL_rd);
-      cstate->out_n++;
-      PopOp(cstate);
-
-      return TRUE;
-    }
+    DEBUG(MSG_READ_OP, Sdprintf("Drop convertible for %s\n", stringOp(op)));
+    op->convertible = FALSE;
   }
 
   return TRUE;
@@ -3657,24 +3684,6 @@ can_reduce(op_entry *op, short cpri, int out_n, ReadData _PL_rd)
 }
 
 
-static int
-op_to_out(cterm_state *cstate, op_entry *op ARG_LD)
-{ term_t tmp;
-
-  DEBUG(MSG_READ_OP, Sdprintf("%s %s to atom\n",
-			      op->kind == OP_PREFIX ? "Prefix" :
-			      op->kind == OP_INFIX ? "Infix" : "Postfix",
-			      stringOp(op)));
-
-  if ( !(tmp = alloc_term(cstate->rd PASS_LD)) )
-    return FALSE;
-  PL_put_atom(tmp, op->op.atom);
-  queue_out_op(0, op->tpos, cstate->rd);
-  cstate->out_n++;
-
-  return TRUE;
-}
-
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 If we find <op> <infix> <operant>, we must   modify  <op> to be an atom.
 This is called when we find a non-operator argument.
@@ -3685,7 +3694,7 @@ modify_op_infix_arg(cterm_state *cstate ARG_LD)
 { ReadData _PL_rd = cstate->rd;
   op_entry *op1 = SideOp(cstate->side_p);
 
-  if ( cstate->side_n >= 2 )
+  if ( op1->kind == OP_INFIX && cstate->side_n >= 2 )
   { op_entry *op0 = SideOp(cstate->side_p-1);
 
     if ( op0->convertible )
@@ -3710,19 +3719,19 @@ Patterns:
   <prefix> <infix>	--> map <infix> to atom
   <op> <infix> <op>	--> map both <op> to atom
   <arg> <infix> <op>	--> map <op> to atom
+  <arg> <infix>		--> if <infix> is also <postix>, map to <postix>
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 static int
 modify_op_infix_end(cterm_state *cstate ARG_LD)
 { if ( cstate->side_n >= 1 )
   { ReadData _PL_rd = cstate->rd;
-    op_entry *op   = SideOp(cstate->side_p);
+    op_entry *op = SideOp(cstate->side_p);
 
     if ( cstate->side_n >= 2 )
     { op_entry *prev = SideOp(cstate->side_p-1);
       op_entry *first;
 
-      op   = SideOp(cstate->side_p);
       if ( op->convertible && op->kind == OP_INFIX && prev->kind == OP_PREFIX )
       { if ( !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
@@ -3984,14 +3993,6 @@ complex_term(const char *stop, short maxpri, term_t positions,
       }
     }
 
-    if ( cstate.side_n > 0 )
-    { op_entry *e = SideOp(cstate.side_p);
-      if ( e->convertible )
-      { DEBUG(MSG_READ_OP, Sdprintf("Drop convertible for %s\n", stringOp(e)));
-	e->convertible = FALSE;
-      }
-    }
-
     if ( (rc=is_name_token(token, cstate.rmo == 1, _PL_rd)) == TRUE )
     { memset(&in_op, 0, sizeof(in_op));
       in_op.op.atom     = name_token(token, &in_op, _PL_rd);
@@ -4035,7 +4036,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
 
 	DEBUG(MSG_READ_OP, Sdprintf("Infix op: %s\n", stringOp(&in_op)));
 
-	if ( !modify_op(&cstate, in_op.left_pri PASS_LD) )
+	if ( !modify_op(&cstate, &in_op PASS_LD) )
 	  return FALSE;
 
 	if ( cstate.rmo == 1 )
@@ -4060,7 +4061,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
       if ( isOp(&in_op, OP_POSTFIX, _PL_rd PASS_LD) )
       { DEBUG(MSG_READ_OP, Sdprintf("Postfix op: %s\n", stringOp(&in_op)));
 
-	if ( !modify_op(&cstate, in_op.left_pri PASS_LD) )
+	if ( !modify_op(&cstate, &in_op PASS_LD) )
 	  return FALSE;
 	if ( cstate.rmo == 1 )
 	{ if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
