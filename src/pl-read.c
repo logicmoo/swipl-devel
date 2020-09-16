@@ -3568,8 +3568,13 @@ modify_op(cterm_state *cstate, op_entry *e ARG_LD)
     DEBUG(MSG_READ_OP, trap_gdb());
 
     if ( cstate->rmo == 0 && e->left_pri > op->right_pri )
-    { if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
-	   !(cstate->side_n > 1 && SideOp(cstate->side_p-1)->kind == OP_INFIX) &&
+    { op_entry *prev;
+
+      if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
+	   !( cstate->side_n > 1 &&
+	      (prev=SideOp(cstate->side_p-1))->kind == OP_INFIX &&
+	      prev->right_pri < op->op_pri
+	    ) &&
 	   isOp(op, OP_POSTFIX, _PL_rd PASS_LD) )
       { DEBUG(MSG_READ_OP, Sdprintf("%s modifies %s to postfix\n",
 				    stringOp(e), stringOp(op)));
