@@ -3735,7 +3735,7 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
     { op_entry *prev = SideOp(cstate->side_p-1);
       op_entry *first;
 
-      if ( op->convertible && op->kind == OP_INFIX && prev->kind == OP_PREFIX )
+      if ( prev->tokn+1 == op->tokn && op->kind == OP_INFIX && prev->kind == OP_PREFIX )
       { if ( !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
 	PopOp(cstate);
@@ -3746,9 +3746,9 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
 
       if ( cstate->side_n >= 3 &&
 	   prev->kind == OP_INFIX &&
-	   op->convertible &&
+	   prev->tokn+1 == op->tokn &&
 	   (first = SideOp(cstate->side_p-2)) &&
-	   first->convertible )
+	   first->tokn+1 == prev->tokn )
       { if ( !op_to_out(cstate, first PASS_LD) ||
 	     !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
@@ -3760,7 +3760,8 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
       }
 
       if ( cstate->out_n > 0 &&
-	   op->convertible &&
+	   cstate->rmo == 0 &&
+	   prev->tokn+1 == op->tokn &&
 	   prev->kind == OP_INFIX )
       { if ( !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
