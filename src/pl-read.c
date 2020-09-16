@@ -3735,7 +3735,8 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
     { op_entry *prev = SideOp(cstate->side_p-1);
       op_entry *first;
 
-      if ( prev->tokn+1 == op->tokn && op->kind == OP_INFIX && prev->kind == OP_PREFIX )
+      if ( prev->tokn+1 == op->tokn &&
+	   op->kind == OP_INFIX && prev->kind == OP_PREFIX )
       { if ( !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
 	PopOp(cstate);
@@ -3752,7 +3753,7 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
       { if ( !op_to_out(cstate, first PASS_LD) ||
 	     !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
-	*op = *prev;
+	*first = *prev;
 	PopOp(cstate);
 	PopOp(cstate);
 
