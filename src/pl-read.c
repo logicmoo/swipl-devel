@@ -3567,7 +3567,7 @@ modify_op(cterm_state *cstate, op_entry *e ARG_LD)
 
     DEBUG(MSG_READ_OP, trap_gdb());
 
-    if ( op->convertible && cstate->rmo == 0 && e->left_pri > op->right_pri )
+    if ( cstate->rmo == 0 && e->left_pri > op->right_pri )
     { if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
 	   !(cstate->side_n > 1 && SideOp(cstate->side_p-1)->kind == OP_INFIX) &&
 	   isOp(op, OP_POSTFIX, _PL_rd PASS_LD) )
@@ -3581,7 +3581,9 @@ modify_op(cterm_state *cstate, op_entry *e ARG_LD)
 	return TRUE;
       }
 
-      if ( (op->kind == OP_PREFIX || op->kind == OP_INFIX) && !op->isblock )
+      if ( op->convertible &&
+	   (op->kind == OP_PREFIX || op->kind == OP_INFIX) &&
+	   !op->isblock )
       { DEBUG(MSG_READ_OP, Sdprintf("%s modifies %s %s to atom\n",
 				    stringOp(e), kindOp(op), stringOp(op)));
 	if ( !op_to_out(cstate, op PASS_LD) )
