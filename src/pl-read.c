@@ -3571,6 +3571,7 @@ modify_op(cterm_state *cstate, op_entry *e ARG_LD)
     { op_entry *prev;
 
       if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
+	   !op->convertible &&
 	   !( cstate->side_n > 1 &&
 	      (prev=SideOp(cstate->side_p-1))->kind == OP_INFIX &&
 	      prev->right_pri < op->op_pri
@@ -3681,12 +3682,6 @@ can_reduce(op_entry *op, short cpri, int out_n, ReadData _PL_rd)
     return -1;
   }
 
-  DEBUG(MSG_READ_OP,
-	if ( rc )
-	{ GET_LD
-	  Sdprintf("Reducing %s/%d\n", stringOp(op), arity);
-	});
-
   return rc;
 }
 
@@ -3704,7 +3699,7 @@ modify_op_infix_arg(cterm_state *cstate ARG_LD)
   if ( op1->kind == OP_INFIX && cstate->side_n >= 2 )
   { op_entry *op0 = SideOp(cstate->side_p-1);
 
-    if ( op0->convertible )
+    if ( op0->tokn+1 == op1->tokn )
     { if ( !op_to_out(cstate, op0 PASS_LD) )
 	return FALSE;
       *op0 = *op1;
@@ -3727,6 +3722,7 @@ Patterns:
   <op> <infix> <op>	--> map both <op> to atom
   <arg> <infix> <op>	--> map <op> to atom
   <arg> <infix>		--> if <infix> is also <postix>, map to <postix>
+  <prefix>		--> map <prefix> to atom
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 static int
@@ -3775,7 +3771,18 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
       }
     }
 
-    if ( cstate->rmo ==0 &&
+    if ( cstate->rmo == 0 &&
+	 op->kind == OP_PREFIX &&
+	 !op->isblock )
+    { if ( !op_to_out(cstate, op PASS_LD) )
+	  return FALSE;
+      PopOp(cstate);
+      cstate->rmo++;
+
+      return TRUE;
+    }
+
+    if ( cstate->rmo == 0 &&
 	 cstate->out_n > 0 &&
 	 op->kind == OP_INFIX &&
 	 isOp(op, OP_POSTFIX, cstate->rd PASS_LD) )
@@ -3817,6 +3824,13 @@ reduce_op(cterm_state *cstate, int cpri ARG_LD)
 	return FALSE;
       if ( SideOp(cstate->side_p)->kind == OP_INFIX )
 	cstate->out_n--;
+      DEBUG(MSG_READ_OP,
+	    { Sdprintf("Reduced %s %s to (",
+		       kindOp(SideOp(cstate->side_p)), stringOp(SideOp(cstate->side_p)));
+	      PL_write_term(Serror, term_av(-1, cstate->rd)[0],
+			    1200, PL_WRT_QUOTED);
+	      Sdprintf(")\n");
+	    });
       PopOp(cstate);
     } else if ( rc == FALSE )
     { break;
