@@ -3748,7 +3748,8 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
       }
     }
 
-    if ( cstate->out_n > 0 &&
+    if ( cstate->rmo ==0 &&
+	 cstate->out_n > 0 &&
 	 op->kind == OP_INFIX &&
 	 isOp(op, OP_POSTFIX, cstate->rd PASS_LD) )
     { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfix\n", \
