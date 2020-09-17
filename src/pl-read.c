@@ -4059,18 +4059,10 @@ complex_term(const char *stop, short maxpri, term_t positions,
 
 	DEBUG(MSG_READ_OP, Sdprintf("Infix op: %s\n", stringOp(&in_op)));
 
-	if ( !modify_op(&cstate, &in_op PASS_LD) )
-	  return FALSE;
-
-	if ( cstate.rmo == 1 )
-	{ if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
-	    return FALSE;
-	  cstate.rmo--;
-	  goto push_op;
-	} else if ( cstate.side_n > 0 &&
-		    (prev=SideOp(cstate.side_p)) &&
-		    prev->tokn+1 == in_op.tokn &&
-		    (prev->kind == OP_PREFIX || prev->kind == OP_INFIX) )
+	if ( cstate.side_n > 0 &&
+	     (prev=SideOp(cstate.side_p)) &&
+	     prev->tokn+1 == in_op.tokn &&
+	     (prev->kind == OP_PREFIX || prev->kind == OP_INFIX) )
 	{ DEBUG(MSG_READ_OP,
 		Sdprintf("Pushing infix after %s "
 			 "(convertible: \"%s\" and \"%s\")\n",
@@ -4080,14 +4072,22 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	  in_op.convertible = TRUE;
 	  goto push_op;
 	}
+	if ( cstate.rmo == 1 )
+	{ if ( !modify_op(&cstate, &in_op PASS_LD) )
+	    return FALSE;
+	  if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
+	    return FALSE;
+	  cstate.rmo--;
+	  goto push_op;
+	}
       }
       if ( isOp(&in_op, OP_POSTFIX, _PL_rd PASS_LD) )
       { DEBUG(MSG_READ_OP, Sdprintf("Postfix op: %s\n", stringOp(&in_op)));
 
-	if ( !modify_op(&cstate, &in_op PASS_LD) )
-	  return FALSE;
 	if ( cstate.rmo == 1 )
-	{ if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
+	{ if ( !modify_op(&cstate, &in_op PASS_LD) )
+	    return FALSE;
+	  if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
 	    return FALSE;
 	  goto push_op;
 	}
