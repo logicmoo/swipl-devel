@@ -3499,9 +3499,9 @@ isOp(op_entry *e, int kind, int maxpri, ReadData _PL_rd ARG_LD)
 { int pri;
   int type;
 
-  if ( !currentOperator(_PL_rd->module, op_name(e PASS_LD), kind, &type, &pri) &&
+  if ( !currentOperator(_PL_rd->module, op_name(e PASS_LD), kind, &type, &pri) ||
        pri > maxpri )
-    fail;
+    return FALSE;
   e->kind   = kind;
   e->op_pri = pri;
 
@@ -3515,7 +3515,7 @@ isOp(op_entry *e, int kind, int maxpri, ReadData _PL_rd ARG_LD)
     case OP_YFX:	e->left_pri = pri;   e->right_pri = pri-1; break;
   }
 
-  succeed;
+  return TRUE;
 }
 
 
@@ -3560,9 +3560,17 @@ op_to_out(cterm_state *cstate, op_entry *op ARG_LD)
 About to add an operator that demands =< cpri on its left side.
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
+static int modify_op_infix_end(cterm_state *cstate, op_entry *right ARG_LD);
+
 static int
 modify_op(cterm_state *cstate, op_entry *e ARG_LD)
-{ if ( cstate->side_n > 0 )
+{
+#if 0
+  return modify_op_infix_end(cstate, e PASS_LD);
+
+#else
+
+  if ( cstate->side_n > 0 )
   { ReadData _PL_rd = cstate->rd;
     op_entry *op = SideOp(cstate->side_p);
 
@@ -3607,6 +3615,7 @@ modify_op(cterm_state *cstate, op_entry *e ARG_LD)
   }
 
   return TRUE;
+#endif
 }
 
 
