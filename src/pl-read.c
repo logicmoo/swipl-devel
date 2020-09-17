@@ -327,7 +327,6 @@ typedef struct
   } op;				/* Name of the operator */
   unsigned isblock : 1;		/* [...] or {...} operator */
   unsigned isterm : 1;		/* Union is a term */
-  unsigned convertible : 1;	/* Op can be converted to atom */
   char	kind;			/* kind (prefix/postfix/infix) */
   short	left_pri;		/* priority at left-hand */
   short	right_pri;		/* priority at right hand */
@@ -3556,52 +3555,66 @@ op_to_out(cterm_state *cstate, op_entry *op ARG_LD)
   return TRUE;
 }
 
+
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-About to add an operator that demands =< cpri on its left side.
+About to add an operator `right`. `right` is NULL if this is the end of
+the term.  Check the operator stack for required changes. Patterns:
+
+  <prefix> <infix>	--> map <infix> to atom
+  <op> <infix> <op>	--> map both <op> to atom
+  <arg> <infix> <op>	--> map <op> to atom
+  <arg> <infix>		--> if <infix> is also <postix>, map to <postix>
+  <prefix>		--> map <prefix> to atom
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
-static int modify_op_infix_end(cterm_state *cstate, op_entry *right ARG_LD);
-
 static int
-modify_op(cterm_state *cstate, op_entry *e ARG_LD)
-{
-#if 1
-  return modify_op_infix_end(cstate, e PASS_LD);
+modify_op(cterm_state *cstate, op_entry *right ARG_LD)
+{ int cpri = right ? right->left_pri : 1201;
 
-#else
-
-  if ( cstate->side_n > 0 )
+  if ( cstate->side_n >= 1 )
   { ReadData _PL_rd = cstate->rd;
     op_entry *op = SideOp(cstate->side_p);
 
-    DEBUG(MSG_READ_OP, trap_gdb());
+    if ( cstate->side_n >= 2 )
+    { op_entry *prev = SideOp(cstate->side_p-1);
+      op_entry *first;
 
-    if ( cstate->rmo == 0 && e->left_pri > op->right_pri )
-    { op_entry *prev;
-
-      if ( op->kind == OP_INFIX && cstate->out_n > 0 &&
-	   !op->convertible &&
-	   !( cstate->side_n > 1 &&
-	      (prev=SideOp(cstate->side_p-1))->kind == OP_INFIX &&
-	      prev->right_pri < op->op_pri
-	    ) &&
-	   isOp(op, OP_POSTFIX, e->left_pri, _PL_rd PASS_LD) )
-      { DEBUG(MSG_READ_OP, Sdprintf("%s modifies %s to postfix\n",
-				    stringOp(e), stringOp(op)));
-	cstate->rmo++;
-	if ( !build_op_term(op, _PL_rd PASS_LD) )
+					/* <prefix> <infix> --> <prefix>(a1) */
+      if ( prev->tokn+1 == op->tokn &&
+	   op->kind == OP_INFIX && prev->kind == OP_PREFIX &&
+	   prev->right_pri < cpri )
+      { if ( !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
+	PopOp(cstate);
+	cstate->rmo++;
+
+	return TRUE;
+      }
+
+					/* <op> <infix> <op> --> <infix>(a1,a2)*/
+      if ( cstate->side_n >= 3 &&
+	   prev->kind == OP_INFIX &&
+	   prev->right_pri < cpri &&
+	   prev->tokn+1 == op->tokn &&
+	   (first = SideOp(cstate->side_p-2)) &&
+	   first->tokn+1 == prev->tokn )
+      { if ( !op_to_out(cstate, first PASS_LD) ||
+	     !op_to_out(cstate, op PASS_LD) )
+	  return FALSE;
+	*first = *prev;
+	PopOp(cstate);
 	PopOp(cstate);
 
 	return TRUE;
       }
 
-      if ( op->convertible &&
-	   (op->kind == OP_PREFIX || op->kind == OP_INFIX) &&
-	   !op->isblock )
-      { DEBUG(MSG_READ_OP, Sdprintf("%s modifies %s %s to atom\n",
-				    stringOp(e), kindOp(op), stringOp(op)));
-	if ( !op_to_out(cstate, op PASS_LD) )
+					/* <a1> <infix> <op> --> <infix>(a1,a2) */
+      if ( cstate->out_n > 0 &&
+	   cstate->rmo == 0 &&
+	   prev->tokn+1 == op->tokn &&
+	   prev->kind == OP_INFIX &&
+	   prev->right_pri < cpri )
+      { if ( !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
 	PopOp(cstate);
 	cstate->rmo++;
@@ -3610,12 +3623,35 @@ modify_op(cterm_state *cstate, op_entry *e ARG_LD)
       }
     }
 
-    DEBUG(MSG_READ_OP, Sdprintf("Drop convertible for %s\n", stringOp(op)));
-    op->convertible = FALSE;
+					/* <prefix> --> a1 */
+    if ( cstate->rmo == 0 &&
+	 op->kind == OP_PREFIX &&
+	 !op->isblock )
+    { if ( !op_to_out(cstate, op PASS_LD) )
+	  return FALSE;
+      PopOp(cstate);
+      cstate->rmo++;
+
+      return TRUE;
+    }
+					/* <a> <infix> --> <a> <postfix> */
+				        /*             --> <postfix>(a1) */
+    if ( cstate->rmo == 0 &&
+	 cstate->out_n > 0 &&
+	 op->kind == OP_INFIX &&
+	 isOp(op, OP_POSTFIX, cpri, cstate->rd PASS_LD) )
+    { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfix\n", \
+				  stringOp(op)));
+      cstate->rmo++;
+      if ( !build_op_term(op, cstate->rd PASS_LD) )
+	return FALSE;
+      PopOp(cstate);
+
+      return TRUE;
+    }
   }
 
   return TRUE;
-#endif
 }
 
 
@@ -3714,107 +3750,6 @@ modify_op_infix_arg(cterm_state *cstate ARG_LD)
 	return FALSE;
       *op0 = *op1;
       PopOp(cstate);
-      return 2;
-    }
-  }
-
-  op1->convertible = FALSE;
-
-  return TRUE;
-}
-
-
-/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-We got end-of-term. Check  the  operator   stack  for  required changes.
-Patterns:
-
-  <prefix> <infix>	--> map <infix> to atom
-  <op> <infix> <op>	--> map both <op> to atom
-  <arg> <infix> <op>	--> map <op> to atom
-  <arg> <infix>		--> if <infix> is also <postix>, map to <postix>
-  <prefix>		--> map <prefix> to atom
-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
-
-static int
-modify_op_infix_end(cterm_state *cstate, op_entry *right ARG_LD)
-{ int cpri = right ? right->left_pri : 1201;
-
-  if ( cstate->side_n >= 1 )
-  { ReadData _PL_rd = cstate->rd;
-    op_entry *op = SideOp(cstate->side_p);
-
-    if ( cstate->side_n >= 2 )
-    { op_entry *prev = SideOp(cstate->side_p-1);
-      op_entry *first;
-
-					/* <prefix> <infix> --> <prefix>(a1) */
-      if ( prev->tokn+1 == op->tokn &&
-	   op->kind == OP_INFIX && prev->kind == OP_PREFIX &&
-	   prev->right_pri < cpri )
-      { if ( !op_to_out(cstate, op PASS_LD) )
-	  return FALSE;
-	PopOp(cstate);
-	cstate->rmo++;
-
-	return TRUE;
-      }
-
-					/* <op> <infix> <op> --> <infix>(a1,a2)*/
-      if ( cstate->side_n >= 3 &&
-	   prev->kind == OP_INFIX &&
-	   prev->right_pri < cpri &&
-	   prev->tokn+1 == op->tokn &&
-	   (first = SideOp(cstate->side_p-2)) &&
-	   first->tokn+1 == prev->tokn )
-      { if ( !op_to_out(cstate, first PASS_LD) ||
-	     !op_to_out(cstate, op PASS_LD) )
-	  return FALSE;
-	*first = *prev;
-	PopOp(cstate);
-	PopOp(cstate);
-
-	return TRUE;
-      }
-
-					/* <a1> <infix> <op> --> <infix>(a1,a2) */
-      if ( cstate->out_n > 0 &&
-	   cstate->rmo == 0 &&
-	   prev->tokn+1 == op->tokn &&
-	   prev->kind == OP_INFIX &&
-	   prev->right_pri < cpri )
-      { if ( !op_to_out(cstate, op PASS_LD) )
-	  return FALSE;
-	PopOp(cstate);
-	cstate->rmo++;
-
-	return TRUE;
-      }
-    }
-
-					/* <prefix> --> a1 */
-    if ( cstate->rmo == 0 &&
-	 op->kind == OP_PREFIX &&
-	 !op->isblock )
-    { if ( !op_to_out(cstate, op PASS_LD) )
-	  return FALSE;
-      PopOp(cstate);
-      cstate->rmo++;
-
-      return TRUE;
-    }
-					/* <a> <infix> --> <a> <postfix> */
-				        /*             --> <postfix>(a1) */
-    if ( cstate->rmo == 0 &&
-	 cstate->out_n > 0 &&
-	 op->kind == OP_INFIX &&
-	 isOp(op, OP_POSTFIX, cpri, cstate->rd PASS_LD) )
-    { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfix\n", \
-				  stringOp(op)));
-      cstate->rmo++;
-      if ( !build_op_term(op, cstate->rd PASS_LD) )
-	return FALSE;
-      PopOp(cstate);
-
       return TRUE;
     }
   }
@@ -4048,7 +3983,6 @@ complex_term(const char *stop, short maxpri, term_t positions,
 
       if ( cstate.rmo == 0 && isOp(&in_op, OP_PREFIX, 1201, _PL_rd PASS_LD) )
       { DEBUG(MSG_READ_OP, Sdprintf("Prefix op: %s\n", stringOp(&in_op)));
-	in_op.convertible = TRUE;
 
       push_op:
 	Unlock(in_op.op.atom);		/* ok; part of an operator */
@@ -4067,10 +4001,6 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	    return FALSE;
 	}
 
-	if ( in_op.convertible )
-	  DEBUG(MSG_READ_OP, Sdprintf("Set convertible for %s\n",
-				      stringOp(&in_op)));
-
 	PushOp();
 	continue;
       }
@@ -4079,23 +4009,20 @@ complex_term(const char *stop, short maxpri, term_t positions,
 
 	DEBUG(MSG_READ_OP, Sdprintf("Infix op: %s\n", stringOp(&in_op)));
 
+	if ( !modify_op(&cstate, &in_op PASS_LD) )
+	  return FALSE;
+
 	if ( cstate.side_n > 0 &&
 	     (prev=SideOp(cstate.side_p)) &&
 	     prev->tokn+1 == in_op.tokn &&
 	     (prev->kind == OP_PREFIX || prev->kind == OP_INFIX) )
 	{ DEBUG(MSG_READ_OP,
-		Sdprintf("Pushing infix after %s "
-			 "(convertible: \"%s\" and \"%s\")\n",
-			 prev->kind == OP_PREFIX ? "prefix" : "infix",
-			 stringOp(prev), stringOp(&in_op)));
-	  prev->convertible = TRUE;
-	  in_op.convertible = TRUE;
+		Sdprintf("Pushing infix %s after %s %s\n",
+			 stringOp(&in_op), kindOp(prev), stringOp(prev)));
 	  goto push_op;
 	}
 	if ( cstate.rmo == 1 )
-	{ if ( !modify_op(&cstate, &in_op PASS_LD) )
-	    return FALSE;
-	  if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
+	{ if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
 	    return FALSE;
 	  cstate.rmo--;
 	  goto push_op;
@@ -4104,10 +4031,11 @@ complex_term(const char *stop, short maxpri, term_t positions,
       if ( isOp(&in_op, OP_POSTFIX, 1201, _PL_rd PASS_LD) )
       { DEBUG(MSG_READ_OP, Sdprintf("Postfix op: %s\n", stringOp(&in_op)));
 
+	if ( !modify_op(&cstate, &in_op PASS_LD) )
+	  return FALSE;
+
 	if ( cstate.rmo == 1 )
-	{ if ( !modify_op(&cstate, &in_op PASS_LD) )
-	    return FALSE;
-	  if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
+	{ if ( !reduce_op(&cstate, in_op.left_pri PASS_LD) )
 	    return FALSE;
 	  goto push_op;
 	}
@@ -4136,7 +4064,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
 exit:
   unget_token();			/* the full-stop or punctuation */
   DEBUG(MSG_READ_OP, trap_gdb());
-  if ( !modify_op_infix_end(&cstate, NULL PASS_LD) )
+  if ( !modify_op(&cstate, NULL PASS_LD) )
     return FALSE;
   if ( !reduce_op(&cstate, maxpri PASS_LD) )
     return FALSE;
