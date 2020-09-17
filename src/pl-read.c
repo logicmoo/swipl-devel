@@ -3565,7 +3565,7 @@ static int modify_op_infix_end(cterm_state *cstate, op_entry *right ARG_LD);
 static int
 modify_op(cterm_state *cstate, op_entry *e ARG_LD)
 {
-#if 0
+#if 1
   return modify_op_infix_end(cstate, e PASS_LD);
 
 #else
