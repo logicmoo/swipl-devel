@@ -3495,11 +3495,12 @@ typedef struct cterm_state
 } cterm_state;
 
 static bool
-isOp(op_entry *e, int kind, ReadData _PL_rd ARG_LD)
+isOp(op_entry *e, int kind, int maxpri, ReadData _PL_rd ARG_LD)
 { int pri;
   int type;
 
-  if ( !currentOperator(_PL_rd->module, op_name(e PASS_LD), kind, &type, &pri) )
+  if ( !currentOperator(_PL_rd->module, op_name(e PASS_LD), kind, &type, &pri) &&
+       pri > maxpri )
     fail;
   e->kind   = kind;
   e->op_pri = pri;
@@ -3576,7 +3577,7 @@ modify_op(cterm_state *cstate, op_entry *e ARG_LD)
 	      (prev=SideOp(cstate->side_p-1))->kind == OP_INFIX &&
 	      prev->right_pri < op->op_pri
 	    ) &&
-	   isOp(op, OP_POSTFIX, _PL_rd PASS_LD) )
+	   isOp(op, OP_POSTFIX, e->left_pri, _PL_rd PASS_LD) )
       { DEBUG(MSG_READ_OP, Sdprintf("%s modifies %s to postfix\n",
 				    stringOp(e), stringOp(op)));
 	cstate->rmo++;
@@ -3726,8 +3727,10 @@ Patterns:
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 static int
-modify_op_infix_end(cterm_state *cstate ARG_LD)
-{ if ( cstate->side_n >= 1 )
+modify_op_infix_end(cterm_state *cstate, op_entry *right ARG_LD)
+{ int cpri = right ? right->left_pri : 1201;
+
+  if ( cstate->side_n >= 1 )
   { ReadData _PL_rd = cstate->rd;
     op_entry *op = SideOp(cstate->side_p);
 
@@ -3735,8 +3738,10 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
     { op_entry *prev = SideOp(cstate->side_p-1);
       op_entry *first;
 
+					/* <prefix> <infix> --> <prefix>(a1) */
       if ( prev->tokn+1 == op->tokn &&
-	   op->kind == OP_INFIX && prev->kind == OP_PREFIX )
+	   op->kind == OP_INFIX && prev->kind == OP_PREFIX &&
+	   prev->right_pri < cpri )
       { if ( !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
 	PopOp(cstate);
@@ -3745,8 +3750,10 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
 	return TRUE;
       }
 
+					/* <op> <infix> <op> --> <infix>(a1,a2)*/
       if ( cstate->side_n >= 3 &&
 	   prev->kind == OP_INFIX &&
+	   prev->right_pri < cpri &&
 	   prev->tokn+1 == op->tokn &&
 	   (first = SideOp(cstate->side_p-2)) &&
 	   first->tokn+1 == prev->tokn )
@@ -3760,10 +3767,12 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
 	return TRUE;
       }
 
+					/* <a1> <infix> <op> --> <infix>(a1,a2) */
       if ( cstate->out_n > 0 &&
 	   cstate->rmo == 0 &&
 	   prev->tokn+1 == op->tokn &&
-	   prev->kind == OP_INFIX )
+	   prev->kind == OP_INFIX &&
+	   prev->right_pri < cpri )
       { if ( !op_to_out(cstate, op PASS_LD) )
 	  return FALSE;
 	PopOp(cstate);
@@ -3773,6 +3782,7 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
       }
     }
 
+					/* <prefix> --> a1 */
     if ( cstate->rmo == 0 &&
 	 op->kind == OP_PREFIX &&
 	 !op->isblock )
@@ -3783,11 +3793,12 @@ modify_op_infix_end(cterm_state *cstate ARG_LD)
 
       return TRUE;
     }
-
+					/* <a> <infix> --> <a> <postfix> */
+				        /*             --> <postfix>(a1) */
     if ( cstate->rmo == 0 &&
 	 cstate->out_n > 0 &&
 	 op->kind == OP_INFIX &&
-	 isOp(op, OP_POSTFIX, cstate->rd PASS_LD) )
+	 isOp(op, OP_POSTFIX, cpri, cstate->rd PASS_LD) )
     { DEBUG(MSG_READ_OP, Sdprintf("Infix %s to postfix\n", \
 				  stringOp(op)));
       cstate->rmo++;
@@ -4026,7 +4037,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
       DEBUG(MSG_READ_OP, Sdprintf("name %s, rmo = %d\n",
 				  stringOp(&in_op), cstate.rmo));
 
-      if ( cstate.rmo == 0 && isOp(&in_op, OP_PREFIX, _PL_rd PASS_LD) )
+      if ( cstate.rmo == 0 && isOp(&in_op, OP_PREFIX, 1201, _PL_rd PASS_LD) )
       { DEBUG(MSG_READ_OP, Sdprintf("Prefix op: %s\n", stringOp(&in_op)));
 	in_op.convertible = TRUE;
 
@@ -4054,7 +4065,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	PushOp();
 	continue;
       }
-      if ( isOp(&in_op, OP_INFIX, _PL_rd PASS_LD) )
+      if ( isOp(&in_op, OP_INFIX, 1201, _PL_rd PASS_LD) )
       { op_entry *prev;
 
 	DEBUG(MSG_READ_OP, Sdprintf("Infix op: %s\n", stringOp(&in_op)));
@@ -4081,7 +4092,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
 	  goto push_op;
 	}
       }
-      if ( isOp(&in_op, OP_POSTFIX, _PL_rd PASS_LD) )
+      if ( isOp(&in_op, OP_POSTFIX, 1201, _PL_rd PASS_LD) )
       { DEBUG(MSG_READ_OP, Sdprintf("Postfix op: %s\n", stringOp(&in_op)));
 
 	if ( cstate.rmo == 1 )
@@ -4116,7 +4127,7 @@ complex_term(const char *stop, short maxpri, term_t positions,
 exit:
   unget_token();			/* the full-stop or punctuation */
   DEBUG(MSG_READ_OP, trap_gdb());
-  if ( !modify_op_infix_end(&cstate PASS_LD) )
+  if ( !modify_op_infix_end(&cstate, NULL PASS_LD) )
     return FALSE;
   if ( !reduce_op(&cstate, maxpri PASS_LD) )
     return FALSE;
