@@ -1,5 +1,5 @@
 (
-  apt-get build-dep swi-prolog
+  apt-get build-dep -y swi-prolog
 
   apt-get update && apt-get install -y \
 	libcurl4-openssl-dev \
