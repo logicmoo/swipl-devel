@@ -93,6 +93,9 @@
 \libsummary{help}
 \input{summaries.d/help.tex}
 
+\libsummary{increval}
+\libsummary{summaries.d/increval.tex}
+
 \libsummary{intercept}
 \libsummary{summaries.d/intercept.tex}
 
@@ -122,6 +125,9 @@
 
 \libsummary{persistency}
 \input{summaries.d/persistency.tex}
+
+\libsummary{portraytext}
+\input{summaries.d/portraytext.tex}
 
 \libsummary{predicate_options}
 \input{summaries.d/predopts.tex}
@@ -199,6 +205,8 @@ This library is only available on Windows systems.
 \predicatesummary{transportation}{4}{Solve transportation problem}
 \predicatesummary{variable_value}{3}{Fetch value of variable in solved state}
 \end{summarylist}}{}
+
+\libsummary{terms}
 
 \libsummary{ugraphs}
 

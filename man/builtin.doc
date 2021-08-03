@@ -117,16 +117,18 @@ keywords:
 \begin{center}
 \begin{tabular}{lp{0.7\linewidth}}
 \hline
-\const{det} &	  A \jargon{deterministic} predicate always succeeds exactly
-                  once and does not leave a choicepoint. \\
-\const{semidet} & A \jargon{semi-deterministic} predicate succeeds at most
-                  once.  If it succeeds it does not leave a choicepoint. \\
-\const{nondet}  & A \jargon{non-deterministic} predicate is the most general
-		  case and no claims are made on the number of solutions (which
-                  may be zero, i.e., the predicate may \jargon{fail}) and whether
-		  or not the predicate leaves an choicepoint on the last
-		  solution. \\
-\const{nondet}  & As \const{nondet}, but succeeds at least once. \\
+\const{det}       & A \jargon{deterministic} predicate always succeeds exactly
+                    once and does not leave a choicepoint. \\
+\const{semidet}   & A \jargon{semi-deterministic} predicate succeeds at most
+                    once.  If it succeeds it does not leave a choicepoint. \\
+\const{nondet}    & A \jargon{non-deterministic} predicate is the most general
+		    case and no claims are made on the number of solutions (which
+                    may be zero, i.e., the predicate may \jargon{fail}) and
+		    whether or not the predicate leaves an choicepoint on
+		    the last solution. \\
+\const{multi}     & As \const{nondet}, but succeeds at least once. \\
+\const{undefined} & Well founded semantics third value.
+		    See undefined/0. \\
 \hline
 \end{tabular}
 \end{center}
@@ -1133,6 +1135,11 @@ t2(X) :-
     ).
 \end{code}
 
+Note that goal expansion should not bind any variables in the clause.
+Doing so may impact the semantics of the clause if the variable is also
+used elsewhere. In the general case this is not verified. It is verified
+for \predref{\+}{1} and \predref{;}{2}, resulting in an exception.
+
     \predicate{compile_aux_clauses}{1}{+Clauses}
 Compile clauses on behalf of goal_expansion/2.  This predicate compiles
 the argument clauses into static predicates, associating the predicates
@@ -1206,7 +1213,9 @@ will use for the following enhancements:
 These versions are called \emph{before} their 2-argument counterparts.
 The input layout term is either a variable (if no layout information is
 available) or a term carrying detailed layout information as returned by
-the \const{subterm_positions} of read_term/2.
+the \const{subterm_positions} of read_term/2. The output layout should be
+a variable if no layout information can be computed for the expansion;
+a sub-term can also be a variable to indicate ``don't know''.
 \end{description}
 
 
@@ -1383,7 +1392,71 @@ content is first wiped and gradually rebuilt, while other threads see
 an \jargon{atomic} update from the old file content to the
 new.\footnote{This feature was implemented by Keri Harris.}
 
-\subsubsection{Compilation of mutually dependent code} \label{sec:depload}
+
+\subsubsection{Errors and warnings during compilation}
+\label{sec:compilation-messages}
+
+Errors and warnings reported while compiling a file are reported using
+print_message/2. Typical errors are syntax errors, errors during macro
+expansion by term_expansion/2 and goal_expansion/2, compiler errors such
+as illegal clauses or an attempt to redefine a system predicate and
+errors caused by executing \jargon{directives}, notably using
+initialization/1 and initialization/2.
+
+Merely reporting error messages and warnings is typically desirable for
+interactive usage. Non-interactive applications often require to be
+notified of such issues, typically using the \jargon{exit code} of the
+process. We can distinguish two types of errors and warnings: (1) those
+resulting from loading an invalid program and (2) messages that result
+from running the program.  A typical example is user code that wishes
+to try something and in case of an error report this and continue.
+
+\begin{code}
+    ...,
+    E = error(_,_),
+    catch(do_something, E,
+	  print_message(error, E)),
+    ...
+\end{code}
+
+User code may be (and often is) started from directives, while running
+user code may involve compilation due to autoloading, loading of data
+files, etc. As a result, it is unclear whether an error message should
+merely be printed, should result in a non-zero exit status at the end or
+should immediately terminate the process.
+
+The default behaviour is defined by the Prolog flags
+\prologflag{on_error} and \prologflag{on_warning}. It can be fine tuned
+by defining the \jargon{hook predicate} message_hook/3. The compiler
+calls print_message/2 using the level \const{silent} and the message
+below if errors or warnings where printed during the execution of
+load_files/2.
+
+\begin{description}
+    \termitem{load_file_errors}{File, Errors, Warnings}
+Here, \arg{File} is the raw file specification handed to load_files/2,
+i.e., \exam{'myfile.pl'} or \exam{library(lists)}, \arg{Errors} is the
+number of errors printed while loading and \arg{Warnings} is the number
+of warnings printed while loading.   Note that these counts include
+messages from (initialization) directives.
+\end{description}
+
+This allows the user to fine tune the behaviour on errors and, for
+example, halt the process on a non-zero error count right after
+loading the file wth errors using the code below.
+
+\begin{code}
+:- multifile user:message_hook/3.
+
+user:message_hook(load_file_errors(_File, Errors, _Warnings),
+		  _Level, _Lines) :-
+    Errors > 0,
+    halt(1).
+\end{code}
+
+
+\subsubsection{Compilation of mutually dependent code}
+\label{sec:depload}
 
 Large programs are generally split into multiple files. If file $A$
 accesses predicates from file $B$ which accesses predicates from file
@@ -1405,29 +1478,20 @@ between loaded files can still be arbitrary, but the consult relations
 between files must be a proper tree.
 
 
-\subsubsection{Compilation with multiple threads} \label{sec:mtload}
+\subsubsection{Compilation with multiple threads}
+\label{sec:mtload}
 
 This section discusses compiling files for the first time. For
 reloading, see \secref{loadrunningcode}.
 
-In older versions, compilation was thread-safe due to a global
-\jargon{lock} in load_files/2 and the code dealing with
-\jargon{autoloading} (see \secref{autoload}). Besides unnecessary
-stalling when multiple threads trap unrelated undefined predicates,
-this easily leads to deadlocks, notably if threads are started from an
-initialization/1 directive.\footnote{Although such goals are started
-after loading the file in which they appear, the calling thread is still
-likely to hold the `load' lock because it is compiling the file from
-which the file holding the directive is loaded.}
-
-Starting with version 5.11.27, the autoloader is no longer locked and
-multiple threads can compile files concurrently. This requires special
+Multiple threads can compile files concurrently. This requires special
 precautions only if multiple threads wish to load the same file at the
-same time. Therefore, load_files/2 checks automatically whether some other
-thread is already loading the file. If not, it starts loading the file.
-If another thread is already loading the file, the thread blocks until
-the other thread finishes loading the file. After waiting, and if the
-file is a module file, it will make the public predicates available.
+same time. Therefore, load_files/2 checks whether some other thread is
+already loading the file. If not, it starts loading the file. If a
+thread detects that another thread is already loading the file the
+thread blocks until the other thread finishes loading the file. After
+waiting, and if the file is a module file, it imports the exported
+predicates and operators from the module.
 
 Note that this schema does not prevent deadlocks under all situations.
 Consider two mutually dependent (see \secref{depload}) module files $A$
@@ -1740,12 +1804,16 @@ head of a predicate, it is also provided by the predicate =/2.
 \begin{description}
     \infixop[ISO]{=}{?Term1}{?Term2}
 Unify \arg{Term1} with \arg{Term2}. True if the unification succeeds.
-For behaviour on cyclic terms see the Prolog flag
-\prologflag{occurs_check}. It acts as if defined by the following fact:
+It acts as if defined by the following fact:
 
 \begin{code}
 =(Term, Term).
 \end{code}
+
+For behaviour on cyclic terms see the Prolog flag
+\prologflag{occurs_check}. Calls to \predref{=}{2} in a clause body are
+compiled and may be (re)moved depending on the Prolog flag
+\prologflag{optimise_unify}.  See also \secref{indexbody}.
 
     \infixop[ISO]{\=}{@Term1}{@Term2}
 Equivalent to \exam{\Snot Term1 = Term2}.
@@ -1964,6 +2032,9 @@ Prolog dialects. The current name was established in the ISO WG17
 meeting in Edinburgh (2010). The \texttt{chk} postfix was
 considered to refer to determinism as in e.g., memberchk/2.}
 This predicate respects constraints.
+
+See \secref{ssu} for defining clauses whose head is unified using
+\jargon{single sided unification}.
 
     \predicate{term_subsumer}{3}{+Special1, +Special2, -General}
 \arg{General} is the most specific term that is a generalisation of
@@ -2377,30 +2448,195 @@ ERROR: Unhandled exception: Unknown message: ball
 \end{description}
 
     \predicate{call_cleanup}{2}{:Goal, :Cleanup}
-Same as \term{setup_call_cleanup}{true, Goal, Cleanup}.
-This is provided
-for compatibility with a number of other Prolog implementations only.  Do
-not use call_cleanup/2 if you perform side-effects prior to calling
-that will be undone by \arg{Cleanup}.  Instead, use
-setup_call_cleanup/3 with an appropriate first argument to perform those
-side-effects.
+Same as \term{setup_call_cleanup}{true, Goal, Cleanup}. This is provided
+for compatibility with a number of other Prolog implementations only. Do
+not use call_cleanup/2 if you perform side-effects prior to calling that
+will be undone by \arg{Cleanup}. Instead, use setup_call_cleanup/3 with
+an appropriate first argument to perform those side-effects.
 
     \predicate[deprecated]{call_cleanup}{3}{:Goal, +Catcher, :Cleanup}
 Same as \term{setup_call_catcher_cleanup}{true, Goal, Catcher, Cleanup}.
 The same warning as for call_cleanup/2 applies.
+
+    \predicate{undo}{1}{:Goal}
+Add \arg{Goal} to the \jargon{trail}. \arg{Goal} is executed as ignore/1
+on the first opportunity after backtracking to a point before the call
+to \arg{Goal}. This predicate is intended to make otherwise persistent
+changes to the database or created by foreign procedures backtrackable
+if it is possible to define a goal that reverts the effect of the
+initial call.  A typical use case is to define a \jargon{backtrackable
+assert}.
+
+\begin{code}
+b_assertz(Term) :-
+    assertz(Term, Ref),
+    undo(erase(Ref)).
+\end{code}
+
+Without undo/1 we can achieve something similar by leaving a choicepoint
+using the almost portable\footnote{assertz/2 is not part of the ISO
+standard but supported by multiple systems.} alternative below.
+
+\begin{code}
+b_assertz(Term) :-
+    assertz(Term, Ref),
+    (   true
+    ;	erase(Ref),
+	fail
+    ).
+\end{code}
+
+The undo/1 based solution avoids leaving a choice point open and, more
+importantly, keeps undoing the assert also if the choice point from the
+second alternative is pruned.
+
+Currently the following remarks apply
+
+\begin{itemize}
+    \item \arg{Goal} is \emph{copied} when it is registered.
+
+    \item ``First opportunity'' means after backtracking or at the first
+    call port reached.
+
+    \item Multiple undo goals may be scheduled that are executed as a
+    batch.  If multiple goals raise an exception, the most urgent is
+    preserved after all goals have been executed.
+
+    \item It is not allowed for \arg{Goal} to call undo/1.  An attempt
+    to do so results in a \const{permission_error} exception.
+
+    \item Note that an exception that is caught higher in the call stack
+    backtracks and therefore ensures \arg{Goal} is called.
+\end{itemize}
+
+See also snapshot/1 and transaction/1.
 \end{description}
 
 
 \section{Delimited continuations}	     \label{sec:delcont}
 
 The predicates reset/3 and shift/1 implement \jargon{delimited
-continuations} for Prolog. Delimited continuation for Prolog is
+continuations} for Prolog. Delimited continuations for Prolog are
 described in \cite{DBLP:journals/tplp/SchrijversDDW13}
-(\href{http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1124.pdf}{preprint
+(\href{https://www.swi-prolog.org/download/publications/iclp2013.pdf}{preprint
 PDF}). The mechanism allows for proper \jargon{coroutines}, two or more
 routines whose execution is interleaved, while they exchange data. Note
 that coroutines in this sense differ from coroutines realised using
 attributed variables as described in \chapref{clp}.
+
+Note that shift/1 captures the \jargon{forward continuation}. It notably
+does not capture choicepoints. Choicepoints created before the
+continuation is captured remain open, while choicepoints created when
+the continuation is executed live their normal life. Unfortunately the
+consequences for \jargon{committing} a choicepoint is complicated. In
+general a cut (\predref{!}{0}) in the continuation does not have the
+expected result. Negation (\predref{\+}{1}) and if-then(-else)
+(\predref{->}{2}) behave as expected, \emph{provided the continuation is
+called immediately}. This works because for \predref{\+}{1} and
+\predref{->}{2} the continuation contains a reference to the choicepoint
+that must be cancelled and this reference is restored when possible. If,
+as with tabling, the continuation is saved and called later, the commit
+has no effect. We illustrate the three scenarios using with the programs
+below.
+
+\begin{code}
+t1 :-
+    reset(gbad, ball, Cont),
+    (   Cont == 0
+    ->  true
+    ;   writeln(resuming),
+        call(Cont)
+    ).
+
+gbad :-
+    n, !, fail.
+gbad.
+
+n :-
+    shift(ball),
+    writeln(n).
+\end{code}
+
+Here, the \predref{!}{0} has \textbf{no effect}:
+
+\begin{code}
+?- t1.
+resuming
+n
+true.
+\end{code}
+
+The second example uses \predref{\+}{1}, which is essentially
+\exam{(G->fail;true)}.
+
+\begin{code}
+t2 :-
+    reset(gok, ball, Cont),
+    (   Cont == 0
+    ->  true
+    ;   writeln(resuming),
+        call(Cont)
+    ).
+
+gok :-
+    \+ n.
+\end{code}
+
+In this scenario the normal semantics of \predref{\+}{1} is preserved:
+
+\begin{code}
+?- t1.
+resuming
+n
+false.
+\end{code}
+
+In the last example we illustrate what happens if we assert the
+continuation to be executed later. We write the negation using
+if-then-else to make it easier to explain the behaviour.
+
+\begin{code}
+:- dynamic cont/1.
+
+t3 :-
+    retractall(cont(_)),
+    reset(gassert, ball, Cont),
+    (   Cont == 0
+    ->  true
+    ;   asserta(cont(Cont))
+    ).
+
+c3 :-
+    cont(Cont),
+    writeln(resuming),
+    call(Cont).
+
+gassert :-
+    (   n
+    ->  fail
+    ;   true
+    ).
+\end{code}
+
+Now, \nopredref{t3}{0} succeeds \emph{twice}. This is because
+\nopredref{n}{0} shifts, so the commit to the fail/0 branch is not
+executed and the true/0 branch is evaluated normally. Calling the
+continuation later using \nopredref{c3}{0} fails because the choicepoint
+that realised the if-then-else does not exist in the continuation and
+thus the effective continuation is the remainder of \nopredref{n}{0} and
+fail/0 in \nopredref{gassert}{0}.
+
+\begin{code}
+?- t3.
+true ;
+true.
+
+?- c3.
+resuming
+n
+false.
+\end{code}
+
 
 The suspension mechanism provided by delimited continuations is used to
 implement \jargon{tabling} \cite{DBLP:journals/tplp/DesouterDS15},
@@ -2428,6 +2664,13 @@ Abandon the execution of the current goal, returning control to just
 except that (1) nothing is `undone' and (2) the 3th argument of
 reset/3 is unified with the \jargon{continuation}, which allows the
 code calling reset/3 to \jargon{resume} the current goal.
+
+    \predicate[experimental]{shift_for_copy}{1}{+Ball}
+Similar to shift/1.  This version is intended for situations where
+it is assumed the continuation is copied and saved to be executed
+one or multiple times in a different context.  This notably prevents
+restoring choice points saved for \predref{\+}{1},
+\textit{If{->}Then{;}Else}, etc.
 \end{description}
 
 
@@ -2757,9 +3000,13 @@ the Prolog flag \prologflag{verbose} to \const{silent}.
 Message from library(debug).  See debug/3.
 
     \termitem{error}{}
-The message indicates an erroneous situation.  This kind is used to
-print uncaught exceptions of type \term{error}{Formal, Context}. See
-section introduction (\secref{printmsg}).
+The message indicates an erroneous situation. This kind is used to print
+uncaught exceptions of type \term{error}{Formal, Context}. See section
+introduction (\secref{printmsg}). An error message causes the process to
+halt with status 1 if the Prolog flag \prologflag{on_error} is set to
+\const{halt} and the message is not intercepted by message_hook/3.  Not
+intercepted error messages increment the \const{errors} key for
+statistics/2.
 
     \termitem{help}{}
 User requested help message, for example after entering `h' or `?' to
@@ -2782,7 +3029,11 @@ Messages from the (command line) tracer.
 
     \termitem{warning}{}
 The message indicates something dubious that is not considered fatal.
-For example, discontiguous predicates (see discontiguous/1).
+For example, discontiguous predicates (see discontiguous/1). A warning
+message causes the process to halt with status 1 if the Prolog flag
+\prologflag{on_warning} is set to \const{halt} and the message is not
+intercepted by message_hook/3. Not intercepted warning messages
+increment the \const{warnings} key for statistics/2.
 \end{description}
 
 The predicate print_message/2 first translates the \arg{Term} into a
@@ -3524,6 +3775,8 @@ files provide clauses for dynamic predicates.
 
 \begin{description}
     \predicate{transaction}{1}{:Goal}
+    \nodescription
+    \predicate{transaction}{2}{:Goal, +Options}
 Run \arg{Goal} as once/1 in a transaction. This implies that access to
 dynamic predicates `sees' the dynamic predicates at the moment the
 transaction is started, together with the modifications issued by
@@ -3561,6 +3814,18 @@ However, if multiple transactions manipulate the same predicate(s)
 concurrently (typically using transaction/3), the final order of the
 clauses is the order in which the transactions asserted the clauses and
 \textbf{not} the order in which the transactions are committed.
+
+The transaction/1 variant is equivalent to \term{transaction}{Goal,[]}.
+The transaction/2 variant processed the following options:
+
+    \begin{description}
+    \termitem{bulk}{+Boolean}
+When \const{true}, accumulate events from changes to dynamic predicates
+(see prolog_listen/2) and trigger these events as part of the commit
+phase. This implies that if the transaction is not committed the events
+are never triggered. Failure to trigger the events causes the
+transaction to be discarded.  Experimental.
+    \end{description}
 
     \predicate{transaction}{3}{:Goal, :Constraint, +Mutex}
 Similar to transaction/1, but allows verifying \arg{Constraint} during
@@ -3633,24 +3898,87 @@ performed.
 	The given clause will be asserted at the start or end.  Note
 	that due to competing transactions the clause may no longer
 	be the first/last clause of the predicate.
-	\termitem{erase}{+ClauseRef}
+	\termitem{erased}{+ClauseRef}
 	The given clause will be removed.  This may be due to erase/1,
 	retract/1 or retractall/1.
     \end{description}
 \end{description}
 
-\paragraph{Status} SWI-Prolog transaction management is highly
-experimental. Interaction with other parts of the system such as the
-library \pllib{persistency}, incremental tabling
-(\secref{tabling-incremental}), etc.\ still have to be settled. Future
-versions may also support non-determinism through transactions and
-snapshots.  This is merely a first step to explore isolated changes to
-the dynamic predicate database.  If you use these facilities
+\subsubsection{Impact of transactions}
+\label{sec:transaction-impact}
 
-\begin{itemize}
-    \item Be aware that the API and exact semantics may still change.
-    \item Discuss successes and problems at our \href{https://swi-prolog.discourse.group/}{Discourse forum}.
-\end{itemize}
+Transactions interact with other facilities that depend on changing
+dynamic predicates.  This section discusses these interactions.
+
+\begin{description}
+    \item [ Last modified generation ]
+Using the predicate_property/2 property
+\term{last_modified_generation}{Generation} we can determine whether a
+predicate was modified. When a predicate is changed inside a transaction
+this generation is not updated. The generation for dynamic predicates
+that are modified in the transaction is updated to the \jargon{commit
+generation} when the transaction is committed.  Asking for the last
+modified generation \emph{inside} the transaction examines the log
+of modified clauses and reports the generation as one of
+
+    \begin{itemize}
+        \item The global modified generation if the predicate was
+	not modified in the transaction and not modified outside
+	the transaction to beyond the start generation of the
+	transaction.  If the modified generation is higher than
+	the transaction start generation, this generation is reported.
+	\bug{Note that the above implies that inside a transaction we
+	observe a changing last modified generation for predicates that
+	have only been modified outside the transaction while these
+	changes are not visible.}
+
+	\item The transaction start generation plus the local generation
+	of the last change if the predicate is modified inside the
+	transaction.
+    \end{itemize}
+
+    \item [ Wait for database changes ]
+The predicate thread_wait/2 does not wakeup threads for changes inside a
+transaction. The wakeup is delayed until the transaction is committed.
+Note that thread_wait/2 cannot be meaningfully called from inside a
+transaction because no external entities can cause changes to the
+dynamic database inside the transaction.
+
+    \item [ Incremental tabling ]
+Consistency of tables must be restored if the transaction is rolled
+back. For
+local tables this is realised as follows:
+
+    \begin{itemize}
+	\item Tables are either marked to be \jargon{invalidated} on
+	rollback or, for \jargon{monotonic} tabling individual answers
+	are marked to be removed on rollback.
+	\item A table is marked to be \jargon{invalidated} if, while it
+	is created or reevaluated, at least one dependent dynamic
+	predicate has been modified inside the transaction.
+	\item Answers are marked to be retracted when they result from
+	monotonic reevaluation based on changes \emph{inside} the
+	transaction.
+    \end{itemize}
+
+In other words: tables being reevaluated inside a transaction that do
+not depend on predicates modified inside the transaction remain valid.
+Monotonic tables that get new answers due to asserts inside the
+transaction have these answers removed during the rollback while the
+table remains valid. Monotonic tables that are for some reason
+invalidated inside the transaction are invalidated during the rollback.
+
+Correct interaction between tabling and transaction currently
+\textbf{only deals with local tables}. \jargon{Shared} tables should not
+be combined with transactions. Future versions may improve on that. A
+possible route is to make a local copy from a shared table when
+(re)evaluation is performed inside a transaction.
+\end{description}
+
+\paragraph{Status} SWI-Prolog transaction basics and API are stable.
+Interaction with other parts of the system that depend on dynamic
+predicates is still unsettled. Future versions may support
+non-determinism through transactions and snapshots.
 
 \subsection{The recorded database}
 \label{sec:recdb}
@@ -4285,6 +4613,13 @@ being \emph{reloaded}, in which case it claims the predicate defined
 only if it is defined in another source or it has seen a definition
 in the current source.  See compile_aux_clauses/1.
 
+    \termitem{det}{}
+The predicate is defined to be deterministic using det/1.
+
+    \termitem{discontiguous}{}
+True after discontiguous/1 was used to flag that the clauses of
+the predicates may not be contiguous.
+
     \termitem{dynamic}{}
 True if assert/1 and retract/1 may be used to modify the predicate.
 This property is set using dynamic/1.
@@ -4370,6 +4705,10 @@ compound term with the same name and arity as the predicate where each
 argument of the term is a meta-predicate specifier.  See meta_predicate/1
 for details.
 
+    \termitem{monotonic}{}
+True if the predicate is tabled or dynamic using monotonic propagation.
+See \secref{tabling-monotonic}.
+
     \termitem{nodebug}{}
 Details of the predicate are not shown by the debugger. This is the
 default for built-in predicates.  User predicates can be compiled this
@@ -4397,6 +4736,13 @@ that is not just \const{true} (i.e., a \jargon{fact}).
 Database generation at which the predicate was modified for the last
 time.  Intended to quickly assesses the validity of caches.
 
+    \termitem{opaque}{}
+This property applies to dynamic and tabled predicates.  For dynamic
+predicates it (temporary) stops propagating updates to dependent
+incrementally or monotonic tabled predicates.  For tabled predicates
+it is not an error for an opaque predicate to depend on incremental
+or monotonic dynamic or tabled predicates.
+
     \termitem{public}{}
 Predicate is declared public using public/1.  Note that without further
 definition, public predicates are considered undefined and this property
@@ -4415,6 +4761,10 @@ clause_property/2) and the memory used by clause indexes (see the
 data structures. These are garbage data structures that have been
 detached from the predicate but cannot yet be reclaimed because
 they may be in use by some thread.
+
+    \termitem{ssu}{}
+The predicate has been defined using \jargon{single sided unification}
+rules.  See \secref{ssu}.
 
     \termitem{static}{}
 The definition can \emph{not} be modified using assertz/1 and friends.
@@ -4938,12 +5288,13 @@ file descriptor that is not associated to a regular file.
     \termitem{representation_errors}{Mode}
 Determines behaviour of character output if the stream cannot represent
 a character. For example, an ISO Latin-1 stream cannot represent
-Cyrillic characters.  The behaviour is one of \const{error} (throw
-an I/O error exception), \const{prolog} (write \verb$\...\$ escape
-code) or \const{xml} (write \verb$&#...;$ XML character entity).
-The initial mode is \const{prolog} for the user streams and
-\const{error} for all other streams. See also \secref{encoding}
-and set_stream/2.
+Cyrillic characters. The behaviour is one of \const{error} (throw an I/O
+error exception), \const{prolog} (write \verb$\x<hex>\$),
+\const{unicode} (write \verb$\uXXXX$ or \verb$\UXXXXXXXX$ escape
+sequences) or \const{xml} (write \verb$&#...;$ XML character entity).
+The initial mode is \const{unicode} for the user streams and
+\const{error} for all other streams. See also \secref{encoding} and
+set_stream/2.
 
     \termitem{timeout}{-Time}
 \arg{Time} is the timeout currently associated with the stream.  See
@@ -4964,13 +5315,16 @@ output handles are not connected to valid streams. In these cases write
 errors may be ignored on \const{user_error}.
 \end{description}
 
-    \predicate{current_stream}{3}{?Object, ?Mode, ?Stream}
+    \predicate[deprecated]{current_stream}{3}{?Object, ?Mode, ?Stream}
 The predicate current_stream/3 is used to access the status of a
 stream as well as to generate all open streams.  \arg{Object} is the
 name of the file opened if the stream refers to an open file, an
 integer file descriptor if the stream encapsulates an operating system
 stream, or the atom \const{[]} if the stream refers to some other object.
 \arg{Mode} is one of \const{read} or \const{write}.
+
+This predicate is deprecated. New code should use the ISO predicate
+stream_property/2.
 
     \predicate{is_stream}{1}{+Term}
 True if \arg{Term} is a stream name or valid stream handle.  This
@@ -5850,6 +6204,12 @@ If \const{true} and \term{quoted}{true} is active, special characters
 in quoted atoms and strings are emitted as ISO escape sequences.
 Default is taken from the reference module (see below).
 
+    \termitem{character_escapes_unicode}{Bool}
+If \const{true} and \term{character_escapes}{true} and
+\term{quoted}{true} are active escapted characters are written using
+\verb$\uXXXX$ or \verb$\UXXXXXXXX$ syntax.  The default depends on the
+Prolog flag \prologflag{character_escapes_unicode}
+
     \termitem{cycles}{Bool}
 If \const{true} (default), cyclic terms are written as
 \term{@}{Template, Substitutions}, where \arg{Substitutions} is a list
@@ -5968,8 +6328,19 @@ the argument to an operator.  For example:
 \end{code}
 
     \termitem{quoted}{Bool}
-If \const{true}, atoms and functors that need quotes will be quoted.
-The default is \const{false}.
+If \const{true}, atoms and strings that need quotes will be quoted. The
+default is \const{false}. If \prologflag{character_escapes} is
+\const{true} (default) characters in the quoted atom or string are
+escaped using backslash (\chr{\}) sequences. To the minimum, the quote
+itself, newlines and backslash characters are escaped to make the output
+valid for read/1. All unassigned unicode characters and characters in
+the Unicode \jargon{separator} (Z*) and \jargon{control} (C*) classes
+except for the ASCII space (\verb$\u0020$) are escaped. For those
+characters for which an ISO Prolog single character escape, e.g.,
+\verb$\t$ is defined, this is used. Otherwise the output depends on the
+option \const{character_escapes_unicode}. If this flag applies(default)
+the widely accepted \verb$\uXXXX$ or \verb$\UXXXXXXXX$ is used.
+Otherwise the ISO Prolog \verb$\x<hex>\$ syntax is used.
 
     \termitem{spacing}{+Spacing}
 Determines whether and where extra white space is added to enhance
@@ -6413,10 +6784,34 @@ is unbound and \arg{Name}/\arg{Arity} is insufficiently instantiated.
 
 SWI-Prolog also supports terms with arity 0, as in \exam{a()} (see
 \secref{extensions}). Such terms must be processed using
-compound_name_arity/3. The predicate functor/3 and \predref{=..}{2}
-raise a \const{domain_error} when faced with these terms. Without this
-precaution a \jargon{round trip} of a term with arity 0 over functor/3
-would create an atom.
+functor/4 or compound_name_arity/3. The predicate functor/3 and
+\predref{=..}{2} raise a \const{domain_error} when faced with these
+terms. Without this precaution a \jargon{round trip} of a term with
+arity 0 over functor/3 would create an atom.
+
+    \predicate{functor}{4}{?Term, ?Name, ?Arity, ?Type}
+As functor/3, but designed to work with zero-arity terms (e.g.,
+\exam{a()}, see \secref{extensions}). \arg{Type} is one of \const{atom},
+\const{compound}, \const{callable} or \const{atomic}. \arg{Type}
+\emph{must} be instantiated if \arg{Name} is an atom and \arg{Arity} is
+0 (zero).  In other cases \arg{Type} may be a variable.  This predicate
+is true if \arg{Term} (either initially or after haveing been created
+from \arg{Name} and \arg{Type}) and \arg{Type} are related as below
+
+    \begin{itemize}
+    \item If \arg{Term} is compound (including zero-arity compounds),
+    \arg{Type} must be \const{compound} or \const{callable}.  If
+    \arg{Type} is unbound is is unified with \const{compound}.
+    \item If \arg{Term} is an atom, \arg{Type} must be \const{atom}
+    or \const{callable}. If \arg{Type} is unbound is is unified with
+    \const{atom}.
+    \item Else \arg{Type} is unified with \const{atomic}.
+    \end{itemize}
+
+This predicate provides a safe \jargon{round trip} for zero-arity
+compounds and atoms. It can also be used as a variant of functor/3 that
+only processes compound or callable terms. See also compound/1,
+callable/1 and compound_name_arity/3.
 
     \predicate[ISO]{arg}{3}{?Arg, +Term, ?Value}
 \arg{Term} should be instantiated to a term, \arg{Arg} to an integer
@@ -6458,9 +6853,9 @@ ERROR: Domain error: `compound_non_zero_arity' expected, found `a()'
 \end{code}
 
     \predicate{compound_name_arity}{3}{?Compound, ?Name, ?Arity}
-Rationalized version of functor/3 that only works for compound terms
-and can examine and create compound terms with zero arguments (e.g,
-\exam{name()}).  See also compound_name_arguments/3.
+Version of functor/3 that only works for compound terms and can examine
+and create compound terms with zero arguments (e.g, \exam{name()}). See
+also compound_name_arguments/3.  See also functor/4.
 
     \predicate{compound_name_arguments}{3}{?Compound, ?Name, ?Arguments}
 Rationalized version of \predref{=..}{2} that can compose and decompose
@@ -6895,21 +7290,35 @@ True if \arg{Atom} starts with the characters from \arg{Prefix}.
 Its behaviour is equivalent to
 \exam{?- sub_atom(\arg{Atom}, 0, _, _, \arg{Prefix})}.  Deprecated.
 
-    \predicate[ISO]{sub_atom}{5}{+Atom, ?Before, ?Len, ?After, ?Sub}
+    \predicate[ISO]{sub_atom}{5}{+Atom, ?Before, ?Length, ?After, ?SubAtom}
 ISO predicate for breaking atoms.  It maintains the following relation:
-\arg{Sub} is a sub-atom of \arg{Atom} that starts at \arg{Before}, has
-\arg{Len} characters, and \arg{Atom} contains \arg{After} characters
-after the match.
+\arg{SubAtom} is a sub-atom of \arg{Atom} that starts at (0-based index)
+\arg{Before}, has \arg{Length} characters, and \arg{Atom} contains \arg{After}
+characters after the match. The implementation minimises non-determinism and
+creation of atoms. This is a flexible predicate that can do search, prefix- and
+suffix-matching, etc.
+
+Pick out a sub-atom of length 3 starting a 0-based index 2:
 
 \begin{code}
-?- sub_atom(abc, 1, 1, A, S).
-
-A = 1, S = b
+?- sub_atom(aaxyzbbb, 2, 3, After, SubAtom).
+After = 3,
+SubAtom = xyz.
 \end{code}
 
-The implementation minimises non-determinism and creation of atoms.
-This is a flexible predicate that can do search, prefix- and
-suffix-matching, etc.
+On backtracking, matches are delivered in order left-to-right (i.e.
+\arg{Before} increases monotonically):
+
+\begin{code}
+?- sub_atom('xATGATGAxATGAxATGAx', Before, Length, After, 'ATGA').
+Before = 1, Length = 4, After = 14 ;
+Before = Length, Length = 4, After = 11 ;
+Before = 9, Length = 4, After = 6 ;
+Before = 14, Length = 4, After = 1 ;
+false.
+\end{code}
+
+See also sub_string/5, the corresponding predicate for SWI-Prolog strings.
 
     \predicate[semidet]{sub_atom_icasechk}{3}{+Haystack, ?Start, +Needle}
 True when \arg{Needle} is a sub atom of \arg{Haystack} starting at
@@ -7072,6 +7481,8 @@ digit(6))} yields \arg{X} = \exam{'6'}.  Useful for parsing numbers.
 \arg{Char} is a hexadecimal digit with value \arg{Weight}. I.e.\
 \exam{char_type(a, xdigit(X))} yields \arg{X} = \exam{'10'}. Useful for
 parsing numbers.
+    \termitem{print}{}
+\arg{Char} is printable character.
     \termitem{graph}{}
 \arg{Char} produces a visible mark on a page when printed. Note that
 the space is not included!
@@ -7309,7 +7720,8 @@ and modules.
 	    \op{meta_predicate},
 	    \op{module_transparent}, \op{multifile}, \op{public},
 	    \op{thread_local}, \op{thread_initialization}, \op{volatile} \\
-1100 & xfy & \op{;}, \op{|} \\
+1105 & xfy & \op{|} \\
+1100 & xfy & \op{;} \\
 1050 & xfy & \op{->}, \op{*->} \\
 1000 & xfy & \op{,} \\
 990 & xfx & \op{:=} \\
@@ -7876,22 +8288,33 @@ values for \arg{RoundMode} are the same as the flag values:
 Evaluate to the larger of \arg{Expr1} and \arg{Expr2}.  Both
 arguments are compared after converting to the same type, but the
 return value is in the original type.  For example, max(2.5, 3) compares
-the two values after converting to float, but returns the integer 3.
+the two values after converting to float, but returns the integer 3.  If
+both values are numerical equal the returned max is of the type used for
+the comparison.  For example, the max of 1 and 1.0 is 1.0 because both
+numbers are converted to float for the comparison.  However, the special
+float -0.0 is smaller than 0.0 as well as the integer 0.
 
     \function[ISO]{min}{2}{+Expr1, +Expr2}
 Evaluate to the smaller of \arg{Expr1} and \arg{Expr2}. See
 \funcref{max}{2} for a description of type handling.
 
-    \function{.}{2}{+Int, []}
-A list of one element evaluates to the element. This implies \exam{"a"}
-evaluates to the character code of the letter `a' (97) using the
-traditional mapping of double quoted string to a list of character
-codes. Arithmetic evaluation also translates a string object (see
-\secref{string}) of one character length into the character code for
-that character. This implies that expression \exam{"a"} also works of
-the Prolog flag \prologflag{double_quotes} is set to \const{string}. The
-recommended way to specify the character code of the letter `a' is
-\exam{0'a}.
+    \function[deprecated]{.}{2}{+Char, []}
+A list of one element evaluates to the character code of this
+element.\footnote{The function is documented as \functor{.}{2}. Using
+SWI-Prolog v7 and later the actual functor is \functor{[|]}{2}.} This
+implies \exam{"a"} evaluates to the character code of the letter `a'
+(97) using the traditional mapping of double quoted string to a list of
+character codes. \arg{Char} is either a valid code point (non-negative
+integer up to the Prolog flag \prologflag{max_char_code}) or a
+one-character atom. Arithmetic evaluation also translates a string
+object (see \secref{string}) of one character length into the character
+code for that character. This implies that expression \exam{"a"} works
+if the Prolog flag \prologflag{double_quotes} is set to one of
+\const{codes}, \const{chars} or \const{string}.
+
+Getting access to character codes this way originates from DEC10 Prolog.
+ISO has the \exam{0'a} syntax and the predicate char_code/2.  Future
+versions may drop support for \exam{X is "a"}.
 
     \function{random}{1}{+IntExpr}
 Evaluate to a random integer \arg{i} for which $0 \leq i <
@@ -8330,8 +8753,8 @@ primitives are built-in and described here.
 
 \begin{description}
     \predicate{is_list}{1}{+Term}
-True if \arg{Term} is bound to the empty list (\exam{[]}) or a term with
-functor `\const{'[|]'}'\footnote{The traditional list functor is the dot
+True if \arg{Term} is bound to the empty list (\const{[]}) or a compound
+term with name `\const{[|]}'\footnote{The traditional list functor name is the dot
 (\const{'.'}). This is still the case of the command line option
 \cmdlineoption{--traditional} is given. See also \secref{ext-lists}.}
 and arity~2 and the second argument is a list.%
@@ -8344,7 +8767,7 @@ and arity~2 and the second argument is a list.%
 		  quick-and-dirty is_list/1 is a good choice. Richard
 		  O'Keefe pointed at this issue.}
 This predicate acts as if defined by the definition below on
-\jargon{acyclic} terms. The implementation \emph{fails} safely if
+\jargon{acyclic} terms. The implementation safely \emph{fails} if
 \arg{Term} represents a cyclic list.
 
 \begin{code}
@@ -8368,27 +8791,47 @@ error.\footnote{\textit{Eventually} here means it will scan as many
 elements as the longest list that may exist given the current stack
 usage before raising the exception.}
 
-    \predicate[ISO]{length}{2}{?List, ?Int}
-True if \arg{Int} represents the number of elements in \arg{List}.
+    \predicate[ISO]{length}{2}{?List, ?Length}
+True if \arg{Length} represents the number of elements in \arg{List}.
 This predicate is a true relation and can be used to find the length of
-a list or produce a list (holding variables) of length \arg{Int}.  The
+a list or produce a list (holding variables) of length \arg{Length}. The
 predicate is non-deterministic, producing lists of increasing length if
-\arg{List} is a \jargon{partial list} and \arg{Int} is unbound. It
-raises errors if
+\arg{List} is a \jargon{partial list} and \arg{Length} is a variable.
 
-    \begin{itemize}
-    \item \arg{Int} is bound to a non-integer.
-    \item \arg{Int} is a negative integer.
-    \item \arg{List} is neither a list nor a partial list.  This
-	  error condition includes cyclic lists.\footnote{ISO
-	  demands failure here. We think an error is more appropriate.}
-    \end{itemize}
+\begin{code}
+?- length(List,4).
+List = [_27940,_27946,_27952,_27958].
 
-This predicate fails if the tail of \arg{List} is equivalent to
-\arg{Int} (e.g., \exam{length(L,L)}).\footnote{This is logically
-correct. An exception would be more appropriate, but to our best
-knowledge, current practice in Prolog does not describe a suitable
-candidate exception term.}
+?- length(List,Length).
+List = [], Length = 0 ;
+List = [_24698], Length = 1 ;
+List = [_24698,_25826], Length = 2
+...
+\end{code}
+
+It raises errors if \arg{Length} is bound to a non-integer or a negative
+integer or if \arg{List} is neither a list nor a partial list. This
+error condition includes cyclic lists:%
+\footnote{ISO demands failure here. We think an error is more appropriate.}
+
+\begin{code}
+?- A=[1,2,3|A], length(A,L).
+ERROR: Type error: `list' expected ...
+\end{code}
+
+Covering an edge case, the predicate fails if the tail of \arg{List} is
+equivalent to \arg{Length}:%
+\footnote{This is logically correct. An exception would be more appropriate,
+but to our best knowledge, current practice in Prolog does not describe
+a suitable candidate exception term.}
+
+\begin{code}
+?- List=[1,2,3|Length],length(List,Length).
+false.
+
+?- length(Length,Length).
+false.
+\end{code}
 
     \predicate[ISO]{sort}{2}{+List, -Sorted}
 True if \arg{Sorted} can be unified with a list holding the
@@ -8501,8 +8944,10 @@ sort_atoms_by_length(Atoms, ByLength) :-
 Sorts similar to sort/2, but determines the order of two terms by
 calling \mbox{\arg{Pred}(-\arg{Delta}, +\arg{E1}, +\arg{E2})}.  This
 call must unify \arg{Delta} with one of \const{<}, \const{>} or
-\const{=}.  If the built-in predicate compare/3 is used, the result is
-the same as sort/2.  See also keysort/2.
+\const{=}. Duplicates are removed (i.e. equivalence classes of
+elements as defined by \arg{Pred} are collapsed to a single element in
+\arg{Sorted}) If the built-in predicate compare/3 is used, the result is
+the same as sort/2. See also keysort/2.
 \end{description}
 
 
@@ -9025,7 +9470,7 @@ thread_initialization/1 to define a global variable it will be
 defined, restored after reloading a saved state and created in all
 threads that are created \emph{after} the registration.  Finally,
 global variables can be initialised using the exception hook
-exception/3.  The latter technique is used by CHR (see \chapref{chr}).
+exception/3.  See also nb_current/2 and nb_delete/1.
 
 
 \begin{description}
@@ -9034,7 +9479,8 @@ Associate the term \arg{Value} with the atom \arg{Name} or replace
 the currently associated value with \arg{Value}.  If \arg{Name} does
 not refer to an existing global variable, a variable with initial value
 \const{[]} is created (the empty list).  On backtracking the
-assignment is reversed.
+assignment is reversed.  Furture versions may cause subsequent fetching
+of the variable to fail.  See also nb_delete/1.
 
     \predicate{b_getval}{2}{+Name, -Value}
 Get the value associated with the global variable \arg{Name} and unify
@@ -9087,11 +9533,18 @@ demo_nb_linkval :-
 Enumerate all defined variables with their value. The order of
 enumeration is undefined. Note that nb_current/2 can be used as an
 alternative for nb_getval/2 to request the value of a variable and fail
-silently if the variable does not exists.
+silently if the variable does not exists. Note that if the variable is
+not defined, exception/3 is called attempting to define it. As of
+version 8.3.28, a failure of exception/3 to define the variable causes
+the variable to be defined with a reserved valued to avoid subsequent
+calls to exception/3.
 
     \predicate{nb_delete}{1}{+Name}
 Delete the named global variable.  Succeeds also if the named variable
-does not exist.
+does not exist. Deleting a global variable ensures the variable is
+associated to a reserved value to avoid subsequent calls to exception/3.
+Note that this implies that the resources associated with a global
+variable are never fully reclaimed.
 \end{description}
 
 
@@ -9351,6 +9804,18 @@ can be added using win_add_dll_directory/2.
 
     \predicate{win_remove_dll_directory}{1}{-Cookie}
 Remove a DLL search directory installed using win_add_dll_directory/2.
+
+    \predicate{win_process_modules}{1}{-FileNames}
+This predicate is a wrapper around EnumProcessModules(). \arg{FileNames}
+is unified with a list of absolute paths for all \jargon{modules} of the
+Windows process. Modules are the main executable file and all DLLs
+loaded into the process, \emph{except} \jargon{data DLLs}.  The
+returned file names are in canonical Prolog representation.  This
+predicate may be used to debug loading a DLL from an unexpected location
+and as a helper for packaging all dependencies when creating a
+distribution.  According to the Windows documentation this API may
+return incorrect results if DLLs are loaded or unloaded while
+EnumProcessModules() is in progress. See also qsave_program/2.
 \end{description}
 
 
@@ -9808,14 +10273,21 @@ the item.
     \predicate{access_file}{2}{+File, +Mode}
 True if \arg{File} exists and can be accessed by this Prolog
 process under mode \arg{Mode}.  \arg{Mode} is one of the atoms
-\const{read}, \const{write}, \const{append}, \const{exist}, \const{none} or
-\const{execute}. \arg{File} may also be the name of a directory. Fails
-silently otherwise.  \exam{access_file(File, none)} simply succeeds
-without testing anything.
+\const{read}, \const{write}, \const{append}, \const{execute},
+\const{search}, \const{exist}, or \const{none}. Fails silently otherwise.
+\arg{File} may also be the name of a directory.
+\exam{access_file(File, none)} simply succeeds without testing anything.
 
 If \arg{Mode} is \const{write} or \const{append}, this predicate also succeeds
 if the file does not exist and the user has write access to the
 directory of the specified location.
+
+The mode \const{execute} is only intended for use with regular files
+and the mode \const{search} only with directories. However, the two
+modes are currently equivalent and both can be used with either files
+or directories. This may change in the future, so the results of
+checking \const{execute} access on directories or \const{search} access
+on regular files should not be relied on.
 
 The behaviour is backed up by the POSIX access() API. The Windows
 replacement (_waccess()) returns incorrect results because it does not
@@ -9935,8 +10407,8 @@ in a directive, it uses the current source file as reference.
 
     \termitem{access}{Mode}
 Imposes the condition access_file(\arg{File}, \arg{Mode}).  \arg{Mode}
-is one of \const{read}, \const{write}, \const{append},
-\const{execute}, \const{exist} or \const{none}. See also access_file/2.
+is one of \const{read}, \const{write}, \const{append}, \const{execute},
+\const{search}, \const{exist} or \const{none}. See also access_file/2.
 
     \termitem{file_type}{Type}
 Defines extensions. Current mapping: \const{txt} implies \const{['']},
@@ -10157,8 +10629,10 @@ and `a'.  See also \secref{urgentexceptions}.
 \end{code}
 
     \predicate[ISO]{halt}{0}{}
-Terminate Prolog execution.  This is the same as \term{halt}{0}. See
-halt/1 for details.
+Terminate Prolog execution with default exit code using halt/1. The
+default exit code is normally 0, but can be 1 if one of the Prolog
+flags \prologflag{on_error} or \prologflag{on_warning} is set to
+\const{status} and there have been errors or warnings.
 
     \predicate[ISO]{halt}{1}{+Status}
 Terminate Prolog execution with \arg{Status}. This predicate calls
@@ -10299,14 +10773,14 @@ successful completion. See once/1.  Later implementations may have the
 same semantics as call/1.
 
     \predicate{debug}{0}{}
-Start debugger. In debug mode, Prolog stops at spy and trace points,
+Start debugger. In debug mode, Prolog stops at spy and break points,
 disables last-call optimisation and aggressive destruction of
 choice points to make debugging information accessible.  Implemented
 by the Prolog flag \prologflag{debug}.
 
 Note that the \const{min_free} parameter of all stacks is enlarged to
 8~K cells if debugging is switched off in order to avoid excessive GC. GC
-complicates tracing because it renames the \textit{_G<NNN>} variables
+complicates tracing because it renames the \textit{_<NNN>} variables
 and replaces unreachable variables with the atom
 \verb$<garbage_collected>$. Calling nodebug/0 does \emph{not} reset the
 initial free-margin because several parts of the top level and debugger
@@ -10424,6 +10898,94 @@ not quoted. See also \secref{processorcharset}.
 \end{description}
 \end{description}
 
+\section{Debugging and declaring determinism}
+\label{sec:debug-determinism}
+
+A common issue with Prolog programs of a \jargon{procedural} nature is
+to guarantee deterministic behaviour and debug possible problems with
+determinism. SWI-Prolog provides several mechanisms to make writing,
+debugging and maintaining deterministic code easier. One of them is
+\jargon{Single Sided Unification} using \funcref{=>}{2} rules as
+described in \secref{ssu}. This section deals with annotating your
+program.
+
+\begin{quote}
+\textbf{WARNING:} The primitives in this section are experimental.
+The naming and exact semantics may change.  If you are interested
+in this, please follow and contribute to discussion on the Discourse
+forum.
+\end{quote}
+
+
+\begin{description}
+    \predicate[experimental,directive]{det}{1}{+PredicateIndicators}
+Declare a number of predicates as \const{det}, \emph{deterministic}. As
+a result, both failure and success with a choicepoint is considered an
+error.  The behaviour if the declaration is violated is controlled with
+the Prolog flag \prologflag{determinism_error}.  The default is to raise
+an exception (\const{error}).  Consider the following program:
+
+\begin{code}
+:- det(p/1).
+
+p(1).
+p(2).
+\end{code}
+
+Now, a call \exam{?- p(1).} behaves normally.  However:
+
+\begin{code}
+?- p(X).
+ERROR: Deterministic procedure p/1 succeeded with a choicepoint
+ERROR: In:
+ERROR:   [10] p(1)
+
+?- p(a).
+ERROR: Deterministic procedure p/1 failed
+ERROR: In:
+ERROR:   [10] p(a)
+\end{code}
+
+    \predicate[experimental]{$}{0}{}
+The \predref{$}{0} constructs acts similar to the \predref{!}{0},
+but in addition declares that the remainder of the clause body shall
+succeed deterministically.  It exploits the same underlying mechanism
+as the det/1 declaration.   See also \predref{$}{1}.
+
+    \predicate[experimental]{$}{1}{:Goal}
+Verify that \arg{Goal} succeeds deterministically.  This predicate
+has no effect if \arg{Goal} succeeds without a choicepoint.  Otherwise
+the result depends on the Prolog flag \prologflag{determinism_error}:
+
+    \begin{description}
+	\termitem{silent}{}
+    Act as once/1.
+	\termitem{warning}{}
+    Print a warning and act as once/1.
+	\termitem{error}{}
+    Raise a \const{determinism_error} exception.
+    \end{description}
+
+Note that if \predref{$}{1} is used for the last call, last call
+optimization is not effective. This behaviour ensures consistent errors
+or warnings. Last call optimization with determinism checking can be
+realised using \verb=..., $, Last.=, i.e. by executing
+\predref{$}{0} before the last call rather than wrapping the last call
+in \predref{$}{1}.
+\end{description}
+
+A deterministic predicate may call normal predicates. No error is
+triggered as long as the deterministic predicate either ignores a
+possible failure, e.g., using \predref{\+}{1} and prunes possible choice
+points created by called predicates. If the last predicate is a normal
+predicate the requirement to succeed deterministically is transferred to
+the new goal. As last-call optimization causes the information which
+predicate initially claimed to be deterministic to be lost, the error is
+associated with the called predicate. Debug mode (see debug/0 or the
+Prolog flag \prologflag{debug}) may be used to avoid last call
+optimization and find the call stack that causes the issue.
+
+
 \section{Obtaining Runtime Statistics}	\label{sec:statistics}
 
 \begin{description}
@@ -10452,6 +11014,7 @@ clauses         & Total number of clauses in the program \\
 codes           & Total size of (virtual) executable code in words \\
 cputime         & (User) {\sc cpu} time since thread was started in seconds \\
 epoch		& Time stamp when thread was started \\
+errors		& Number of error mesages printed \\
 functors        & Total number of defined name/arity pairs \\
 functor_space   & Bytes used to represent functors \\
 global          & Allocated size of the global stack in bytes \\
@@ -10490,6 +11053,7 @@ engines_created & MT-version: number of created engines \\
 threads_peak	& MT-version: highest id handed out.  This is a fair but
 		  possibly not 100\% accurate value for the highest
 		  number of threads since the process was created. \\
+warnings	& Number of warning mesages printed \\
 \hline
 \end{tabular}
 \end{center}
@@ -10640,7 +11204,8 @@ loop :-
 \end{code}
 
 The Prolog top-level loop is written this way, reclaiming memory
-resources after every user query.
+resources after every user query. See also trim_heap/0 and
+thread_idle/2.
 
     \predicate{set_prolog_stack}{2}{+Stack, +KeyValue}
 Set a parameter for one of the Prolog runtime stacks. \arg{Stack} is one
@@ -10690,6 +11255,7 @@ flag \prologflag{stack_limit}.
 \subsection{Heap memory (malloc)}	\label{sec:malloc}
 
 \index{tcmalloc}%
+\index{ptmalloc}%
 SWI-Prolog's memory management is based on the C runtime malloc()
 function and related functions.  The characteristics of the malloc()
 implementation may affect performance and overall memory usage of the
@@ -10729,6 +11295,23 @@ can also be achieved using the environment variable \const{LD_PRELOAD}:
 \begin{code}
 % LD_PRELOAD=/path/to/libtcmalloc.so swipl ...
 \end{code}
+
+SWI-Prolog attempts to detect the currently active allocator and sets
+the Prolog flag \prologflag{malloc} if the detection succeeds.
+regardless of the malloc implementation, trim_heap/0 is provided.
+
+\begin{description}
+    \predicate[det]{trim_heap}{0}
+This predicate attempts to return heap memory to the operating system.
+There is no portable way of doing so. If the system detects tcmalloc it
+calls MallocExtension_ReleaseFreeMemory(). If the system detects
+ptmalloc as provided by the GNU runtime library it calls malloc_trim().
+In other cases this predicate simply succeeds.  See also trim_stacks/0
+\end{description}
+
+
+\subsubsection{TCMalloc control predicates}
+\label{sec:tcmalloc}
 
 If SWI-Prolog core detects that tcmalloc is the current allocator and
 provides the following additional predicates.

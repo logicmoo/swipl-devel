@@ -37,10 +37,18 @@
 #ifdef SECURE_GC
 #define O_DEBUG 1			/* include checkData() */
 #endif
-#include "pl-incl.h"
+#include "pl-pro.h"
 #include "pl-arith.h"
 #include "os/pl-cstack.h"
+#include "os/pl-ctype.h"
 #include "pl-event.h"
+#include "pl-tabling.h"
+#include "pl-trace.h"
+#include "pl-setup.h"
+#include "pl-wam.h"
+#include "pl-attvar.h"
+#include "pl-proc.h"
+#include "pl-fli.h"
 
 
 		/********************************
@@ -74,7 +82,7 @@ resetProlog(int clear_stacks)
   }
 
 #ifdef O_LIMIT_DEPTH
-  depth_limit   = (uintptr_t)DEPTH_NO_LIMIT;
+  LD->depth_info.limit = DEPTH_NO_LIMIT;
 #endif
 
   LD->autoload.nesting = NULL;
@@ -118,6 +126,9 @@ query_loop(atom_t goal, int loop)
 { GET_LD
   int rc;
   int clear_stacks = (LD->query == NULL);
+
+  if ( loop )
+    enable_debug_on_interrupt(TRUE);
 
   do
   { fid_t fid;
@@ -179,15 +190,17 @@ pl_break1(atom_t goal)
   int rc = TRUE;
   int old_level = LD->break_level;
 
-  IOSTREAM *inSave  = Scurin;
-  IOSTREAM *outSave = Scurout;
-  intptr_t skipSave = debugstatus.skiplevel;
-  int  suspSave     = debugstatus.suspendTrace;
+  IOSTREAM *inSave       = Scurin;
+  IOSTREAM *outSave      = Scurout;
+  intptr_t skipSave      = debugstatus.skiplevel;
+  int  suspSave          = debugstatus.suspendTrace;
   int  traceSave;
   debug_type debugSave;
+  tbl_status tblstat;
 
   tracemode(FALSE, &traceSave);
   debugmode(DBG_OFF, &debugSave);
+  save_tabling_status(&tblstat);
 
   Scurin  = Sinput;
   Scurout = Soutput;
@@ -210,6 +223,7 @@ pl_break1(atom_t goal)
   }
   LD->break_level = old_level;
 
+  restore_tabling_status(&tblstat);
   debugstatus.suspendTrace = suspSave;
   debugstatus.skiplevel    = skipSave;
   tracemode(traceSave, NULL);
@@ -233,11 +247,11 @@ pl_break(void)
 { GET_LD
   wakeup_state wstate;
 
-  if ( saveWakeup(&wstate, TRUE PASS_LD) )
+  if ( saveWakeup(&wstate, TRUE) )
   { word rc;
 
     rc = pl_break1(ATOM_dquery_loop);
-    restoreWakeup(&wstate PASS_LD);
+    restoreWakeup(&wstate);
 
     return rc;
   }
@@ -559,8 +573,9 @@ static intptr_t check_marked;
 #define mark(p)		(*(p) |= MARK_MASK, check_marked++)
 #define unmark(p)	(*(p) &= ~MARK_MASK, check_marked--)
 
+#define unmark_data(p) LDFUNC(unmark_data, p)
 static void
-unmark_data(Word p ARG_LD)
+unmark_data(DECL_LD Word p)
 {
 last_arg:
   deRef(p);
@@ -577,7 +592,7 @@ last_arg:
     f = valueTerm(*p);
     arity = arityFunctor(f->definition);
     for(n=0; n<arity-1; n++)
-      unmark_data(&f->arguments[n] PASS_LD);
+      unmark_data(&f->arguments[n]);
     p = &f->arguments[n];
     goto last_arg;
   }
@@ -596,8 +611,9 @@ is_ht_capacity(int arity)
 }
 #endif
 
+#define check_data(p, context) LDFUNC(check_data, p, context)
 static word
-check_data(Word p, chk_data *context ARG_LD)
+check_data(DECL_LD Word p, chk_data *context)
 { int arity; int n;
   Word p2;
   word key = 0L;
@@ -764,7 +780,7 @@ last_arg:
 
     mark(p);
     for(n=0; n<arity-1; n++)
-      key += check_data(&f->arguments[n], context PASS_LD);
+      key += check_data(&f->arguments[n], context);
 
     p = &f->arguments[n];
     goto last_arg;
@@ -779,8 +795,8 @@ checkDataEx(Word p, int flags)
   word key;
 
   context.flags = flags;
-  key = check_data(p, &context PASS_LD);
-  unmark_data(p PASS_LD);
+  key = check_data(p, &context);
+  unmark_data(p);
 
   return key;
 }

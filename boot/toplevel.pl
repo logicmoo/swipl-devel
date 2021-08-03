@@ -743,10 +743,12 @@ setup_interactive :-
     ->  true
     ;   print_message(error, error(goal_failed('$compile'), _)),
         halt(1)
-    ).
+    ),
+    halt.                               % set exit code
 
 '$compile_' :-
     '$load_system_init_file',
+    catch(setup_colors, _, true),
     '$set_file_search_paths',
     init_debug_flags,
     '$run_initialization',
@@ -837,6 +839,7 @@ read_expanded_query(BreakLev, ExpandedQuery, ExpandedBindings) :-
         prompt(Old, '')
     ),
     trim_stacks,
+    trim_heap,
     repeat,
       read_query(Prompt, Query, Bindings),
       prompt(_, Old),

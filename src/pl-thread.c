@@ -52,11 +52,25 @@
 #endif
 
 #include "pl-incl.h"
+#include "pl-thread.h"
 #include "pl-tabling.h"
+#include "pl-undo.h"
 #include "os/pl-cstack.h"
 #include "pl-prof.h"
 #include "pl-event.h"
 #include "pl-comp.h"
+#include "pl-setup.h"
+#include "pl-fli.h"
+#include "pl-wam.h"
+#include "pl-pro.h"
+#include "pl-trace.h"
+#include "pl-rec.h"
+#include "pl-index.h"
+#include "pl-proc.h"
+#include "pl-modul.h"
+#include "pl-util.h"
+#include "pl-prims.h"
+#include "pl-supervisor.h"
 #include <stdio.h>
 #include <math.h>
 
@@ -445,6 +459,13 @@ win_thread_initialize(void)
 		 *	  LOCAL PROTOTYPES	*
 		 *******************************/
 
+#if USE_LD_MACROS
+#define	get_message_queue_unlocked(t, queue)	LDFUNC(get_message_queue_unlocked, t, queue)
+#define	get_message_queue(t, queue)		LDFUNC(get_message_queue, t, queue)
+#endif /*USE_LD_MACROS*/
+
+#define LDFUNC_DECLARATIONS
+
 static PL_thread_info_t *alloc_thread(void);
 static void	destroy_message_queue(message_queue *queue);
 static void	destroy_thread_message_queue(message_queue *queue);
@@ -462,8 +483,8 @@ static void	detach_engine(PL_engine_t e);
 static void	free_thread_wait(PL_local_data_t *ld);
 
 static int	unify_queue(term_t t, message_queue *q);
-static int	get_message_queue_unlocked__LD(term_t t, message_queue **queue ARG_LD);
-static int	get_message_queue__LD(term_t t, message_queue **queue ARG_LD);
+static int	get_message_queue_unlocked(term_t t, message_queue **queue);
+static int	get_message_queue(term_t t, message_queue **queue);
 static void	release_message_queue(message_queue *queue);
 static void	initMessageQueues(void);
 static int	get_thread(term_t t, PL_thread_info_t **info, int warn);
@@ -480,6 +501,8 @@ static void	print_trace(int depth);
 static void timespec_diff(struct timespec *diff,
 			  const struct timespec *a, const struct timespec *b);
 static int  timespec_sign(const struct timespec *t);
+
+#undef LDFUNC_DECLARATIONS
 
 		 /*******************************
 		 *	     LOCAL DATA		*
@@ -549,7 +572,7 @@ initialise_thread(PL_thread_info_t *info)
     return FALSE;
   }
 
-  initPrologLocalData(info->thread_data);
+  WITH_LD(info->thread_data) initPrologLocalData();
   info->thread_data->magic = LD_MAGIC;
 
   return TRUE;
@@ -653,7 +676,7 @@ freePrologThread(PL_local_data_t *ld, int after_fork)
 
   #ifdef O_PROFILE
     if ( ld->profile.active )
-      activateProfiler(FALSE, ld);
+      WITH_LD(ld) activateProfiler(FALSE);
   #endif
 
     destroy_event_list(&ld->event.hook.onthreadexit);
@@ -664,7 +687,7 @@ freePrologThread(PL_local_data_t *ld, int after_fork)
     ld->magic = 0;
     if ( ld->stacks.global.base )		/* otherwise not initialised */
     { simpleMutexLock(&ld->thread.scan_lock);
-      freeStacks(ld);
+      WITH_LD(ld) freeStacks();
       simpleMutexUnlock(&ld->thread.scan_lock);
     }
     freePrologLocalData(ld);
@@ -672,7 +695,7 @@ freePrologThread(PL_local_data_t *ld, int after_fork)
     /*PL_unregister_atom(ld->prompt.current);*/
 
     freeThreadSignals(ld);
-    time = info->is_engine ? 0.0 : ThreadCPUTime(ld, CPU_USER);
+    time = info->is_engine ? 0.0 : ThreadCPUTime(PASS_AS_LD(ld) CPU_USER);
 
     if ( !after_fork )
     { PL_LOCK(L_THREAD);
@@ -682,6 +705,7 @@ freePrologThread(PL_local_data_t *ld, int after_fork)
     }
     destroy_thread_message_queue(&ld->thread.messages);
     free_predicate_references(ld);
+    free_undo_data(ld);
     if ( ld->btrace_store )
     { btrace_destroy(ld->btrace_store);
       ld->btrace_store = NULL;
@@ -1468,10 +1492,14 @@ PL_w32thread_raise(DWORD id, int sig)
   { PL_thread_info_t *info = GD->thread.threads[i];
 
     if ( info && info->w32id == id && info->thread_data )
-    { raiseSignal(info->thread_data, sig);
-      if ( info->w32id )
-	PostThreadMessage(info->w32id, WM_SIGNALLED, 0, 0L);
+    { PL_local_data_t *ld = info->thread_data;
+
       PL_UNLOCK(L_THREAD);
+      if ( pendingSignal(ld, sig) )
+	ld->signal.forced = sig;
+      else
+	raiseSignal(ld, sig);
+      PostThreadMessage(id, WM_SIGNALLED, 0, 0L);
       DEBUG(MSG_THREAD, Sdprintf("Signalled %d to thread %d\n", sig, i));
       return TRUE;
     }
@@ -1571,11 +1599,12 @@ PL_thread_raise(int tid, int sig)
 }
 
 
-int
-thread_wait_signal(ARG1_LD)
+#define thread_wait_signal(_) LDFUNC(thread_wait_signal, _)
+static int
+thread_wait_signal(DECL_LD)
 { int i;
 
-  while( !is_signalled(PASS_LD1) )
+  while( !is_signalled() )
   {
 #ifdef __WINDOWS__
     MSG msg;
@@ -1620,7 +1649,7 @@ PRED_IMPL("$thread_sigwait", 1, thread_sigwait, 0)
 { PRED_LD
   int sig;
 
-  if ( (sig = thread_wait_signal(PASS_LD1)) >= 0 )
+  if ( (sig = thread_wait_signal()) >= 0 )
     return PL_unify_atom_chars(A1, signal_name(sig));
 
   return FALSE;
@@ -1891,7 +1920,7 @@ copy_local_data(PL_local_data_t *ldnew, PL_local_data_t *ldold,
   if ( !ldnew->thread.info->debug )
   { ldnew->_debugstatus.tracing   = FALSE;
     ldnew->_debugstatus.debugging = DBG_OFF;
-    set(&ldnew->prolog_flag.mask, PLFLAG_LASTCALL);
+    setPrologFlagMask_LD(ldnew, PLFLAG_LASTCALL);
   }
   ldnew->thread.waiting_for = NULL;
   init_message_queue(&ldnew->thread.messages, max_queue_size);
@@ -2075,7 +2104,7 @@ pl_thread_create(term_t goal, term_t id, term_t options)
   info->module = PL_context();
   copy_local_data(ldnew, ldold, queue_max_size);
   if ( at_exit )
-    register_event_hook(&ldnew->event.hook.onthreadexit, FALSE, at_exit, 0);
+    register_event_hook(&ldnew->event.hook.onthreadexit, 0, FALSE, at_exit, 0);
 
   pthread_attr_init(&attr);
   if ( info->detached )
@@ -2248,8 +2277,9 @@ unify_thread_id(term_t id, PL_thread_info_t *info)
    simply a limitation of status pulling.
 */
 
+#define unify_engine_status(status, info) LDFUNC(unify_engine_status, status, info)
 static int
-unify_engine_status(term_t status, PL_thread_info_t *info ARG_LD)
+unify_engine_status(DECL_LD term_t status, PL_thread_info_t *info)
 { return PL_unify_atom(status, ATOM_suspended);
 }
 
@@ -2266,7 +2296,7 @@ unify_thread_status(term_t status, PL_thread_info_t *info,
       if ( info->is_engine )
       { if ( lock ) PL_LOCK(L_THREAD);
 	if ( !info->has_tid )
-	  rc = unify_engine_status(status, info PASS_LD);
+	  rc = unify_engine_status(status, info);
 	if ( lock ) PL_UNLOCK(L_THREAD);
       }
       return rc || PL_unify_atom(status, ATOM_running);
@@ -2438,31 +2468,40 @@ PRED_IMPL("thread_join", 2, thread_join, 0)
   term_t thread = A1;
   term_t retcode = A2;
 
+  PL_LOCK(L_THREAD);
   if ( !get_thread(thread, &info, TRUE) )
+  { PL_UNLOCK(L_THREAD);
     return FALSE;
+  }
 
-  if ( info == LD->thread.info || info->detached )
+  if ( info == LD->thread.info || info->detached || info->joining_by )
   { return PL_error("thread_join", 2,
-		    info->detached ? "Cannot join detached thread"
-				   : "Cannot join self",
+		    info->joining_by ? "Already being joined" :
+		    info->detached   ? "Cannot join detached thread"
+				     : "Cannot join self",
 		    ERR_PERMISSION, ATOM_join, ATOM_thread, thread);
   }
+  info->joining_by = PL_thread_self();
+
+  PL_UNLOCK(L_THREAD);
 
   rc = pthread_join_interruptible(info->tid, &r);
 
-  switch(rc)
-  { case 0:
-      break;
-    case EINTR:
-      return FALSE;
-    case ESRCH:
-      Sdprintf("Join %s: ESRCH from %d\n",
-	       threadName(info->pl_tid), info->tid);
-      return PL_error("thread_join", 2, NULL,
-		      ERR_EXISTENCE, ATOM_thread, thread);
-    default:
-      return PL_error("thread_join", 2, ThError(rc),
-		      ERR_SYSCALL, "pthread_join");
+  if ( rc )
+  { info->joining_by = 0;
+
+    switch(rc)
+    { case EINTR:
+	return FALSE;
+      case ESRCH:
+	Sdprintf("Join %s: ESRCH from %d\n",
+		 threadName(info->pl_tid), info->tid);
+	return PL_error("thread_join", 2, NULL,
+			ERR_EXISTENCE, ATOM_thread, thread);
+      default:
+	return PL_error("thread_join", 2, ThError(rc),
+			ERR_SYSCALL, "pthread_join");
+    }
   }
 
   status = info->status;
@@ -2470,9 +2509,11 @@ PRED_IMPL("thread_join", 2, thread_join, 0)
        COMPARE_AND_SWAP_INT((int*)&info->status, (int)status, (int)PL_THREAD_JOINED) )
   { rval = unify_thread_status(retcode, info, status, FALSE);
 
+    info->joining_by = 0;
     free_thread_info(info);
   } else
-  { rval = PL_error(NULL, 0, "already joined",
+  { info->joining_by = 0;		/* Cannot happen anymore (I think) */
+    rval = PL_error(NULL, 0, "already joined",
 		    ERR_EXISTENCE, ATOM_thread, thread);
   }
 
@@ -2511,6 +2552,13 @@ PRED_IMPL("thread_detach", 1, thread_detach, 0)
 
   if ( !info->detached )
   { int rc;
+
+    if ( info->joining_by )
+    { PL_UNLOCK(L_THREAD);
+      return PL_error(NULL, 0, "Thread is being joined",
+		      ERR_PERMISSION,
+		      ATOM_detach, ATOM_thread, A1);
+    }
 
     if ( (rc=pthread_detach(info->tid)) )
     { assert(rc == ESRCH);
@@ -2591,13 +2639,15 @@ symbol_alias(atom_t symbol)
   return NULL_ATOM;
 }
 
+#define thread_id_propery(info, prop) LDFUNC(thread_id_propery, info, prop)
 static int
-thread_id_propery(PL_thread_info_t *info, term_t prop ARG_LD)
+thread_id_propery(DECL_LD PL_thread_info_t *info, term_t prop)
 { return PL_unify_integer(prop, info->pl_tid);
 }
 
+#define thread_alias_propery(info, prop) LDFUNC(thread_alias_propery, info, prop)
 static int
-thread_alias_propery(PL_thread_info_t *info, term_t prop ARG_LD)
+thread_alias_propery(DECL_LD PL_thread_info_t *info, term_t prop)
 { atom_t symbol, alias;
 
   if ( (symbol=info->symbol) &&
@@ -2607,36 +2657,41 @@ thread_alias_propery(PL_thread_info_t *info, term_t prop ARG_LD)
   fail;
 }
 
+#define thread_status_propery(info, prop) LDFUNC(thread_status_propery, info, prop)
 static int
-thread_status_propery(PL_thread_info_t *info, term_t prop ARG_LD)
+thread_status_propery(DECL_LD PL_thread_info_t *info, term_t prop)
 { IGNORE_LD
 
   return unify_thread_status(prop, info, info->status, TRUE);
 }
 
+#define thread_detached_propery(info, prop) LDFUNC(thread_detached_propery, info, prop)
 static int
-thread_detached_propery(PL_thread_info_t *info, term_t prop ARG_LD)
+thread_detached_propery(DECL_LD PL_thread_info_t *info, term_t prop)
 { IGNORE_LD
 
   return PL_unify_bool_ex(prop, info->detached);
 }
 
+#define thread_debug_propery(info, prop) LDFUNC(thread_debug_propery, info, prop)
 static int
-thread_debug_propery(PL_thread_info_t *info, term_t prop ARG_LD)
+thread_debug_propery(DECL_LD PL_thread_info_t *info, term_t prop)
 { IGNORE_LD
 
   return PL_unify_bool_ex(prop, info->debug);
 }
 
+#define thread_engine_propery(info, prop) LDFUNC(thread_engine_propery, info, prop)
 static int
-thread_engine_propery(PL_thread_info_t *info, term_t prop ARG_LD)
+thread_engine_propery(DECL_LD PL_thread_info_t *info, term_t prop)
 { IGNORE_LD
 
   return PL_unify_bool_ex(prop, info->is_engine);
 }
 
+#define thread_thread_propery(info, prop) LDFUNC(thread_thread_propery, info, prop)
 static int
-thread_thread_propery(PL_thread_info_t *info, term_t prop ARG_LD)
+thread_thread_propery(DECL_LD PL_thread_info_t *info, term_t prop)
 { if ( info->is_engine )
   { thread_handle *th = symbol_thread_handle(info->symbol);
 
@@ -2650,8 +2705,9 @@ thread_thread_propery(PL_thread_info_t *info, term_t prop ARG_LD)
   return FALSE;
 }
 
+#define thread_tid_propery(info, prop) LDFUNC(thread_tid_propery, info, prop)
 static int
-thread_tid_propery(PL_thread_info_t *info, term_t prop ARG_LD)
+thread_tid_propery(DECL_LD PL_thread_info_t *info, term_t prop)
 { IGNORE_LD
 
   if ( info->has_tid )
@@ -2664,8 +2720,9 @@ thread_tid_propery(PL_thread_info_t *info, term_t prop ARG_LD)
   return FALSE;
 }
 
+#define thread_size_propery(info, prop) LDFUNC(thread_size_propery, info, prop)
 static int
-thread_size_propery(PL_thread_info_t *info, term_t prop ARG_LD)
+thread_size_propery(DECL_LD PL_thread_info_t *info, term_t prop)
 { size_t size;
 
   PL_LOCK(L_THREAD);
@@ -2679,15 +2736,15 @@ thread_size_propery(PL_thread_info_t *info, term_t prop ARG_LD)
 }
 
 static const tprop tprop_list [] =
-{ { FUNCTOR_id1,	       thread_id_propery },
-  { FUNCTOR_alias1,	       thread_alias_propery },
-  { FUNCTOR_status1,	       thread_status_propery },
-  { FUNCTOR_detached1,	       thread_detached_propery },
-  { FUNCTOR_debug1,	       thread_debug_propery },
-  { FUNCTOR_engine1,	       thread_engine_propery },
-  { FUNCTOR_thread1,	       thread_thread_propery },
-  { FUNCTOR_system_thread_id1, thread_tid_propery },
-  { FUNCTOR_size1,	       thread_size_propery },
+{ { FUNCTOR_id1,	       LDFUNC_REF(thread_id_propery) },
+  { FUNCTOR_alias1,	       LDFUNC_REF(thread_alias_propery) },
+  { FUNCTOR_status1,	       LDFUNC_REF(thread_status_propery) },
+  { FUNCTOR_detached1,	       LDFUNC_REF(thread_detached_propery) },
+  { FUNCTOR_debug1,	       LDFUNC_REF(thread_debug_propery) },
+  { FUNCTOR_engine1,	       LDFUNC_REF(thread_engine_propery) },
+  { FUNCTOR_thread1,	       LDFUNC_REF(thread_thread_propery) },
+  { FUNCTOR_system_thread_id1, LDFUNC_REF(thread_tid_propery) },
+  { FUNCTOR_size1,	       LDFUNC_REF(thread_size_propery) },
   { 0,			       NULL }
 };
 
@@ -2794,7 +2851,7 @@ enumerate:
     for(;;)
     { PL_thread_info_t *info = GD->thread.threads[state->tid];
 
-      if ( info && (*state->p->function)(info, arg PASS_LD) )
+      if ( info && LDFUNCP(*state->p->function)(info, arg) )
       { if ( state->enum_properties )
 	{ if ( !PL_unify_term(property,
 			      PL_FUNCTOR, state->p->functor,
@@ -2936,7 +2993,7 @@ PL_thread_at_exit(void (*function)(void *), void *closure, int global)
 			     : &LD->event.hook.onthreadexit;
   int (*func)() = (void *)function;
 
-  return register_event_function(list, FALSE, func, closure, 0);
+  return register_event_function(list, 0, FALSE, func, closure, 0);
 }
 
 		 /*******************************
@@ -3041,12 +3098,12 @@ executeThreadSignals(int sig)
     if ( rval )
     {
 #ifdef O_LIMIT_DEPTH
-      uintptr_t olimit = depth_limit;
-      depth_limit = DEPTH_NO_LIMIT;
+      size_t olimit = LD->depth_info.limit;
+      LD->depth_info.limit = DEPTH_NO_LIMIT;
 #endif
       rval = callProlog(gm, goal, PL_Q_CATCH_EXCEPTION, &ex);
 #ifdef O_LIMIT_DEPTH
-      depth_limit = olimit;
+      LD->depth_info.limit = olimit;
 #endif
     } else
     { rval = raiseStackOverflow(GLOBAL_OVERFLOW);
@@ -3098,8 +3155,9 @@ freeThreadSignals(PL_local_data_t *ld)
 		 *	    INTERACTORS		*
 		 *******************************/
 
+#define get_interactor(t, thp, warn) LDFUNC(get_interactor, t, thp, warn)
 static int
-get_interactor(term_t t, thread_handle **thp, int warn ARG_LD)
+get_interactor(DECL_LD term_t t, thread_handle **thp, int warn)
 { atom_t a;
 
   if ( PL_get_atom(t, &a) )
@@ -3205,22 +3263,22 @@ PRED_IMPL("$engine_create", 3, engine_create, 0)
     r = PL_record(A2);
     rc = PL_set_engine(new, &me);
     assert(rc == PL_ENGINE_SET);
-    LOCAL_LD = new;
 
-    if  ( (t = PL_new_term_ref()) &&
-	  (th->interactor.argv = PL_new_term_refs(2)) &&
-	  PL_recorded(r, t) &&
-	  PL_get_arg(1, t, th->interactor.argv+0) &&
-	  PL_get_arg(2, t, th->interactor.argv+1) )
-    { th->interactor.query = PL_open_query(NULL,
-					   PL_Q_CATCH_EXCEPTION|
-					   PL_Q_ALLOW_YIELD|
-					   PL_Q_EXT_STATUS,
-					   pred, th->interactor.argv+1);
-      PL_set_engine(me, NULL);
-      LOCAL_LD = me;
-    } else
-    { assert(0);			/* TBD: copy exception */
+    WITH_LD(new)
+    { if  ( (t = PL_new_term_ref()) &&
+	    (th->interactor.argv = PL_new_term_refs(2)) &&
+	    PL_recorded(r, t) &&
+	    PL_get_arg(1, t, th->interactor.argv+0) &&
+	    PL_get_arg(2, t, th->interactor.argv+1) )
+      { th->interactor.query = PL_open_query(NULL,
+					     PL_Q_CATCH_EXCEPTION|
+					     PL_Q_ALLOW_YIELD|
+					     PL_Q_EXT_STATUS,
+					     pred, th->interactor.argv+1);
+	PL_set_engine(me, NULL);
+      } else
+      { assert(0);			/* TBD: copy exception */
+      }
     }
 
     PL_erase(r);
@@ -3287,7 +3345,7 @@ PRED_IMPL("engine_destroy", 1, engine_destroy, 0)
 { PRED_LD
   thread_handle *th;
 
-  if ( get_interactor(A1, &th, TRUE PASS_LD) )
+  if ( get_interactor(A1, &th, TRUE) )
   { destroy_interactor(th, FALSE);
 
     return TRUE;
@@ -3339,9 +3397,10 @@ suspend_interactor(PL_engine_t me, thread_handle *th)
 
 #define YIELD_ENGINE_YIELD  256		/* keep in sync with engine_yield/1 */
 
+#define interactor_post_answer_nolock(th, ref, package, term) LDFUNC(interactor_post_answer_nolock, th, ref, package, term)
 static int
-interactor_post_answer_nolock(thread_handle *th,
-			      term_t ref, term_t package, term_t term ARG_LD)
+interactor_post_answer_nolock(DECL_LD thread_handle *th,
+			      term_t ref, term_t package, term_t term)
 { PL_engine_t me = LD;
 
   if ( package && th->interactor.package )
@@ -3359,10 +3418,13 @@ interactor_post_answer_nolock(thread_handle *th,
   if ( package )
     th->interactor.package = PL_record(package);
 
-  if ( (LOCAL_LD = activate_interactor(th)) )
+  WITH_LD ( activate_interactor(th) )
   { term_t t;
     int rc;
     record_t r;
+
+    if (!LOCAL_LD)
+      break; /* WITH_LD is a for() statement and can be broken out of */
 
     copy_debug_mode(LD, me);
     rc = PL_next_solution(th->interactor.query);
@@ -3384,7 +3446,7 @@ interactor_post_answer_nolock(thread_handle *th,
       { PL_close_query(th->interactor.query);
 	th->interactor.query = 0;
 	done_interactor(th);
-	LOCAL_LD = suspend_interactor(me, th);
+	suspend_interactor(me, th);
 
 	return FALSE;
       }
@@ -3396,13 +3458,13 @@ interactor_post_answer_nolock(thread_handle *th,
 	PL_close_query(th->interactor.query);
 	th->interactor.query = 0;
 	done_interactor(th);
-	LOCAL_LD = suspend_interactor(me, th);
+	WITH_LD(suspend_interactor(me, th))
+	{ rc = ( (ex = PL_new_term_ref()) &&
+		 PL_recorded(r, ex) &&
+		 PL_raise_exception(ex) );
 
-	rc = ( (ex = PL_new_term_ref()) &&
-	       PL_recorded(r, ex) &&
-	       PL_raise_exception(ex) );
-
-	PL_erase(r);
+	  PL_erase(r);
+	}
 	return rc;
       }
       case YIELD_ENGINE_YIELD:			/* engine_yield/1 */
@@ -3417,11 +3479,12 @@ interactor_post_answer_nolock(thread_handle *th,
       }
     }
 
-    LOCAL_LD = suspend_interactor(me, th);
-    rc = ( (t=PL_new_term_ref()) &&
-	   PL_recorded(r, t) &&
-	   PL_unify(term, t) );
-    PL_erase(r);
+    WITH_LD(suspend_interactor(me, th))
+    { rc = ( (t=PL_new_term_ref()) &&
+	     PL_recorded(r, t) &&
+	     PL_unify(term, t) );
+      PL_erase(r);
+    }
 
     return rc;
   }
@@ -3442,16 +3505,17 @@ thread_symbol(const PL_local_data_t *ld)
 }
 
 
+#define interactor_post_answer(ref, package, term) LDFUNC(interactor_post_answer, ref, package, term)
 static int
-interactor_post_answer(term_t ref, term_t package, term_t term ARG_LD)
+interactor_post_answer(DECL_LD term_t ref, term_t package, term_t term)
 { thread_handle *th;
 
-  if ( get_interactor(ref, &th, TRUE PASS_LD) )
+  if ( get_interactor(ref, &th, TRUE) )
   { int rc;
 
     simpleMutexLock(th->interactor.mutex);
     th->interactor.thread = thread_symbol(LD);
-    rc = interactor_post_answer_nolock(th, ref, package, term PASS_LD);
+    rc = interactor_post_answer_nolock(th, ref, package, term);
     th->interactor.thread = NULL_ATOM;
     simpleMutexUnlock(th->interactor.mutex);
 
@@ -3469,7 +3533,7 @@ static
 PRED_IMPL("engine_next", 2, engine_next, 0)
 { PRED_LD
 
-  return interactor_post_answer(A1, 0, A2 PASS_LD);
+  return interactor_post_answer(A1, 0, A2);
 }
 
 /** engine_post(+Engine, +Term)
@@ -3480,7 +3544,7 @@ PRED_IMPL("engine_post", 2, engine_post, 0)
 { PRED_LD
   thread_handle *th;
 
-  if ( get_interactor(A1, &th, TRUE PASS_LD) )
+  if ( get_interactor(A1, &th, TRUE) )
   { int rc;
 
     simpleMutexLock(th->interactor.mutex);
@@ -3507,7 +3571,7 @@ static
 PRED_IMPL("engine_post", 3, engine_post, 0)
 { PRED_LD
 
-  return interactor_post_answer(A1, A2, A3 PASS_LD);
+  return interactor_post_answer(A1, A2, A3);
 }
 
 
@@ -3547,7 +3611,7 @@ PRED_IMPL("is_engine", 1, is_engine, 0)
 { PRED_LD
   thread_handle *th;
 
-  return get_interactor(A1, &th, FALSE PASS_LD);
+  return get_interactor(A1, &th, FALSE);
 }
 
 
@@ -3564,9 +3628,10 @@ typedef enum
 #define MSG_WAIT_TIMEOUT	(-2)
 #define MSG_WAIT_DESTROYED	(-3)
 
-static int dispatch_cond_wait(message_queue *queue,
+#define dispatch_cond_wait(queue, wait, deadline) LDFUNC(dispatch_cond_wait, queue, wait, deadline)
+static int dispatch_cond_wait(DECL_LD message_queue *queue,
 			      queue_wait_type wait,
-			      struct timespec *deadline ARG_LD);
+			      struct timespec *deadline);
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 This code deals with telling other threads something.  The interface:
@@ -3592,8 +3657,9 @@ typedef struct thread_message
 } thread_message;
 
 
+#define create_thread_message(msg) LDFUNC(create_thread_message, msg)
 static thread_message *
-create_thread_message(term_t msg ARG_LD)
+create_thread_message(DECL_LD term_t msg)
 { thread_message *msgp;
   record_t rec;
 
@@ -3626,21 +3692,22 @@ queue_message() adds a message to a message queue.  The caller must hold
 the queue-mutex.
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
+#define queue_message(queue, msgp, deadline) LDFUNC(queue_message, queue, msgp, deadline)
 static int
-queue_message(message_queue *queue, thread_message *msgp,
-	      struct timespec *deadline ARG_LD)
+queue_message(DECL_LD message_queue *queue, thread_message *msgp,
+	      struct timespec *deadline)
 { if ( queue->max_size > 0 && queue->size >= queue->max_size )
   { queue->wait_for_drain++;
 
     while ( queue->size >= queue->max_size )
-    { switch ( dispatch_cond_wait(queue, QUEUE_WAIT_DRAIN, deadline PASS_LD) )
+    { switch ( dispatch_cond_wait(queue, QUEUE_WAIT_DRAIN, deadline) )
       { case CV_INTR:
 	{ if ( !LD )			/* needed for clean exit */
 	  { Sdprintf("Forced exit from queue_message()\n");
 	    exit(1);
 	  }
 
-	  if ( is_signalled(LD) )			/* thread-signal */
+	  if ( is_signalled() )			/* thread-signal */
 	  { queue->wait_for_drain--;
 	    return MSG_WAIT_INTR;
 	  }
@@ -3838,7 +3905,7 @@ cv_timedwait(message_queue *queue,
 
     rc = SleepConditionVariableCS(cond, mutex, api_timeout);
 
-    if ( is_signalled(LD) )
+    if ( is_signalled() )
       return CV_INTR;
     if ( !rc )
       return last ? CV_TIMEDOUT : CV_MAYBE;
@@ -3884,14 +3951,14 @@ cv_timedwait(message_queue *queue,
 
     switch( rc )
     { case ETIMEDOUT:
-	if ( is_signalled(LD) )
+	if ( is_signalled() )
 	  return CV_INTR;
 	if ( api_timeout == deadline )
 	  return CV_TIMEDOUT;
 	return CV_MAYBE;
       case EINTR:			/* can not happen in POSIX, but can in */
       case 0:				/* legacy systems */
-	if ( is_signalled(LD) )
+	if ( is_signalled() )
 	  return CV_INTR;
         return CV_READY;
       default:
@@ -3904,8 +3971,8 @@ cv_timedwait(message_queue *queue,
 #endif /*__WINDOWS__*/
 
 static int
-dispatch_cond_wait(message_queue *queue, queue_wait_type wait,
-		   struct timespec *deadline ARG_LD)
+dispatch_cond_wait(DECL_LD message_queue *queue, queue_wait_type wait,
+		   struct timespec *deadline)
 { int rc;
 
   LD->thread.alert.obj.queue = queue;
@@ -3966,8 +4033,9 @@ we also need to lock to avoid  get_message() destroying the record while
 markAtomsMessageQueue() scans it. This fixes the reopened Bug#142.
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
+#define get_message(queue, msg, deadline) LDFUNC(get_message, queue, msg, deadline)
 static int
-get_message(message_queue *queue, term_t msg, struct timespec *deadline ARG_LD)
+get_message(DECL_LD message_queue *queue, term_t msg, struct timespec *deadline)
 { int isvar = PL_is_variable(msg) ? 1 : 0;
   word key = (isvar ? 0L : getIndexOfTerm(msg));
   fid_t fid = PL_open_foreign_frame();
@@ -4025,7 +4093,7 @@ get_message(message_queue *queue, term_t msg, struct timespec *deadline ARG_LD)
       if ( rc )
       { term_t ex = PL_new_term_ref();
 
-	if ( !(rc=foreignWakeup(ex PASS_LD)) )
+	if ( !(rc=foreignWakeup(ex)) )
 	{ if ( !isVar(*valTermRef(ex)) )
 	    PL_raise_exception(ex);
 	}
@@ -4067,7 +4135,7 @@ get_message(message_queue *queue, term_t msg, struct timespec *deadline ARG_LD)
     queue->waiting++;
     queue->waiting_var += isvar;
     DEBUG(MSG_QUEUE_WAIT, Sdprintf("%d: waiting on queue\n", PL_thread_self()));
-    rc = dispatch_cond_wait(queue, QUEUE_WAIT_READ, deadline PASS_LD);
+    rc = dispatch_cond_wait(queue, QUEUE_WAIT_READ, deadline);
     switch ( rc )
     { case CV_INTR:
       { DEBUG(MSG_QUEUE_WAIT, Sdprintf("%d: CV_INTR\n", PL_thread_self()));
@@ -4077,7 +4145,7 @@ get_message(message_queue *queue, term_t msg, struct timespec *deadline ARG_LD)
 	  exit(1);
 	}
 
-	if ( is_signalled(LD) )		/* thread-signal */
+	if ( is_signalled() )		/* thread-signal */
 	{ queue->waiting--;
 	  queue->waiting_var -= isvar;
 	  PL_discard_foreign_frame(fid);
@@ -4108,8 +4176,9 @@ get_message(message_queue *queue, term_t msg, struct timespec *deadline ARG_LD)
 }
 
 
+#define peek_message(queue, msg) LDFUNC(peek_message, queue, msg)
 static int
-peek_message(message_queue *queue, term_t msg ARG_LD)
+peek_message(DECL_LD message_queue *queue, term_t msg)
 { thread_message *msgp;
   term_t tmp = PL_new_term_ref();
   word key = getIndexOfTerm(msg);
@@ -4253,8 +4322,10 @@ static const opt_spec timeout_options[] =
 	   FALSE (leading to failure).
 */
 
+#define process_deadline_options(options, ts, pts) LDFUNC(process_deadline_options, options, ts, pts)
+
 static int
-process_deadline_options(term_t options,
+process_deadline_options(DECL_LD term_t options,
 			 struct timespec *ts, struct timespec **pts)
 { struct timespec now;
   struct timespec deadline;
@@ -4305,13 +4376,14 @@ process_deadline_options(term_t options,
 }
 
 
+#define wait_queue_message(qterm, q, msg, deadline) LDFUNC(wait_queue_message, qterm, q, msg, deadline)
 static int
-wait_queue_message(term_t qterm, message_queue *q, thread_message *msg,
-		   struct timespec *deadline ARG_LD)
+wait_queue_message(DECL_LD term_t qterm, message_queue *q, thread_message *msg,
+		   struct timespec *deadline)
 { int rc;
 
   for(;;)
-  { rc = queue_message(q, msg, deadline PASS_LD);
+  { rc = queue_message(q, msg, deadline);
 
     switch(rc)
     { case MSG_WAIT_INTR:
@@ -4341,22 +4413,23 @@ wait_queue_message(term_t qterm, message_queue *q, thread_message *msg,
   return rc;
 }
 
+#define thread_send_message(queue, msgterm, deadline) LDFUNC(thread_send_message, queue, msgterm, deadline)
 static int
-thread_send_message__LD(term_t queue, term_t msgterm,
-			struct timespec *deadline ARG_LD)
+thread_send_message(DECL_LD term_t queue, term_t msgterm,
+			struct timespec *deadline)
 { message_queue *q;
   thread_message *msg;
   int rc;
 
-  if ( !(msg = create_thread_message(msgterm PASS_LD)) )
+  if ( !(msg = create_thread_message(msgterm)) )
     return PL_no_memory();
 
-  if ( !get_message_queue__LD(queue, &q PASS_LD) )
+  if ( !get_message_queue(queue, &q) )
   { free_thread_message(msg);
     return FALSE;
   }
 
-  rc = wait_queue_message(queue, q, msg, deadline PASS_LD);
+  rc = wait_queue_message(queue, q, msg, deadline);
   release_message_queue(q);
 
   if ( rc == FALSE )
@@ -4369,7 +4442,7 @@ static
 PRED_IMPL("thread_send_message", 2, thread_send_message, PL_FA_ISO)
 { PRED_LD
 
-  return thread_send_message__LD(A1, A2, NULL PASS_LD);
+  return thread_send_message(A1, A2, NULL);
 }
 
 static
@@ -4379,7 +4452,7 @@ PRED_IMPL("thread_send_message", 3, thread_send_message, 0)
   struct timespec *dlop=NULL;
 
   return process_deadline_options(A3,&deadline,&dlop)
-    &&   thread_send_message__LD(A1, A2, dlop PASS_LD);
+    &&   thread_send_message(A1, A2, dlop);
 }
 
 
@@ -4391,7 +4464,7 @@ PRED_IMPL("thread_get_message", 1, thread_get_message, PL_FA_ISO)
 
   for(;;)
   { simpleMutexLock(&LD->thread.messages.mutex);
-    rc = get_message(&LD->thread.messages, A1, NULL PASS_LD);
+    rc = get_message(&LD->thread.messages, A1, NULL);
     simpleMutexUnlock(&LD->thread.messages.mutex);
 
     if ( rc == MSG_WAIT_INTR )
@@ -4413,7 +4486,7 @@ PRED_IMPL("thread_peek_message", 1, thread_peek_message_1, PL_FA_ISO)
   int rc;
 
   simpleMutexLock(&LD->thread.messages.mutex);
-  rc = peek_message(&LD->thread.messages, A1 PASS_LD);
+  rc = peek_message(&LD->thread.messages, A1);
   simpleMutexUnlock(&LD->thread.messages.mutex);
 
   return rc;
@@ -4576,11 +4649,11 @@ unlocked_message_queue_create(term_t queue, long max_size)
 /* MT: Caller must hold the L_THREAD mutex
 
    Note that this version does not deal with anonymous queues.  High
-   level code must use get_message_queue__LD();
+   level code must use get_message_queue();
 */
 
 static int
-get_message_queue_unlocked__LD(term_t t, message_queue **queue ARG_LD)
+get_message_queue_unlocked(DECL_LD term_t t, message_queue **queue)
 { atom_t name;
   word id = 0;
   int tid = 0;
@@ -4647,7 +4720,7 @@ get_message_queue_unlocked__LD(term_t t, message_queue **queue ARG_LD)
 */
 
 static int
-get_message_queue__LD(term_t t, message_queue **queue ARG_LD)
+get_message_queue(DECL_LD term_t t, message_queue **queue)
 { int rc;
   message_queue *q;
   PL_blob_t *type;
@@ -4667,7 +4740,7 @@ get_message_queue__LD(term_t t, message_queue **queue ARG_LD)
   }
 
   PL_LOCK(L_THREAD);
-  rc = get_message_queue_unlocked__LD(t, queue PASS_LD);
+  rc = get_message_queue_unlocked(t, queue);
   if ( rc )
   { message_queue *q = *queue;
 
@@ -4752,7 +4825,7 @@ PRED_IMPL("message_queue_destroy", 1, message_queue_destroy, 0)
 { PRED_LD
   message_queue *q;
 
-  if ( !get_message_queue__LD(A1, &q PASS_LD) )
+  if ( !get_message_queue(A1, &q) )
     return FALSE;
 
   if ( q->type == QTYPE_THREAD )
@@ -4788,8 +4861,9 @@ PRED_IMPL("message_queue_destroy", 1, message_queue_destroy, 0)
 		 *    MESSAGE QUEUE PROPERTY	*
 		 *******************************/
 
+#define message_queue_alias_property(q, prop) LDFUNC(message_queue_alias_property, q, prop)
 static int		/* message_queue_property(Queue, alias(Name)) */
-message_queue_alias_property(message_queue *q, term_t prop ARG_LD)
+message_queue_alias_property(DECL_LD message_queue *q, term_t prop)
 { if ( !q->anonymous )
     return PL_unify_atom(prop, q->id);
 
@@ -4797,14 +4871,16 @@ message_queue_alias_property(message_queue *q, term_t prop ARG_LD)
 }
 
 
+#define message_queue_size_property(q, prop) LDFUNC(message_queue_size_property, q, prop)
 static int		/* message_queue_property(Queue, size(Size)) */
-message_queue_size_property(message_queue *q, term_t prop ARG_LD)
+message_queue_size_property(DECL_LD message_queue *q, term_t prop)
 { return PL_unify_integer(prop, q->size);
 }
 
 
+#define message_queue_max_size_property(q, prop) LDFUNC(message_queue_max_size_property, q, prop)
 static int		/* message_queue_property(Queue, max_size(Size)) */
-message_queue_max_size_property(message_queue *q, term_t prop ARG_LD)
+message_queue_max_size_property(DECL_LD message_queue *q, term_t prop)
 { size_t ms;
 
   if ( (ms=q->max_size) > 0 )
@@ -4813,8 +4889,9 @@ message_queue_max_size_property(message_queue *q, term_t prop ARG_LD)
   fail;
 }
 
+#define message_queue_waiting_property(q, prop) LDFUNC(message_queue_waiting_property, q, prop)
 static int		/* message_queue_property(Queue, waiting(Count)) */
-message_queue_waiting_property(message_queue *q, term_t prop ARG_LD)
+message_queue_waiting_property(DECL_LD message_queue *q, term_t prop)
 { int waiting;
 
   if ( (waiting=q->waiting) > 0 )
@@ -4824,10 +4901,10 @@ message_queue_waiting_property(message_queue *q, term_t prop ARG_LD)
 }
 
 static const tprop qprop_list [] =
-{ { FUNCTOR_alias1,	    message_queue_alias_property },
-  { FUNCTOR_size1,	    message_queue_size_property },
-  { FUNCTOR_max_size1,	    message_queue_max_size_property },
-  { FUNCTOR_waiting1,	    message_queue_waiting_property },
+{ { FUNCTOR_alias1,	    LDFUNC_REF(message_queue_alias_property) },
+  { FUNCTOR_size1,	    LDFUNC_REF(message_queue_size_property) },
+  { FUNCTOR_max_size1,	    LDFUNC_REF(message_queue_max_size_property) },
+  { FUNCTOR_waiting1,	    LDFUNC_REF(message_queue_waiting_property) },
   { 0,			    NULL }
 };
 
@@ -4902,7 +4979,7 @@ PRED_IMPL("message_queue_property", 2, message_property, PL_FA_NONDETERMINISTIC)
 	  case -1:
 	    fail;
 	}
-      } else if ( get_message_queue__LD(queue, &state->q PASS_LD) )
+      } else if ( get_message_queue(queue, &state->q) )
       { release_message_queue(state->q); /* FIXME: we need some form of locking! */
 
 	switch( get_prop_def(property, ATOM_message_queue_property,
@@ -4953,7 +5030,7 @@ enumerate:
       _PL_get_arg(1, property, a1);
 
     for(;;)
-    { if ( (*state->p->function)(state->q, a1 PASS_LD) )
+    { if ( LDFUNCP(*state->p->function)(state->q, a1) )
       { if ( state->enum_properties )
 	{ if ( !PL_unify_term(property,
 			      PL_FUNCTOR, state->p->functor,
@@ -5003,7 +5080,7 @@ PRED_IMPL("message_queue_set", 2, message_queue_set, 0)
   size_t arity;
   int rc;
 
-  if ( !get_message_queue__LD(A1, &q PASS_LD) )
+  if ( !get_message_queue(A1, &q) )
     return FALSE;
 
   if ( PL_get_name_arity(A2, &name, &arity) && arity == 1 )
@@ -5044,17 +5121,18 @@ thread_get_message(-Message)
     a message from the queue implicitly associated to the thread.
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
+#define thread_get_message(queue, msg, deadline) LDFUNC(thread_get_message, queue, msg, deadline)
 static int
-thread_get_message__LD(term_t queue, term_t msg, struct timespec *deadline ARG_LD)
+thread_get_message(DECL_LD term_t queue, term_t msg, struct timespec *deadline)
 { int rc;
 
   for(;;)
   { message_queue *q;
 
-    if ( !get_message_queue__LD(queue, &q PASS_LD) )
+    if ( !get_message_queue(queue, &q) )
       return FALSE;
 
-    rc = get_message(q, msg, deadline PASS_LD);
+    rc = get_message(q, msg, deadline);
     release_message_queue(q);
 
     switch(rc)
@@ -5084,7 +5162,7 @@ static
 PRED_IMPL("thread_get_message", 2, thread_get_message, 0)
 { PRED_LD
 
-  return thread_get_message__LD(A1, A2, NULL PASS_LD);
+  return thread_get_message(A1, A2, NULL);
 }
 
 
@@ -5095,7 +5173,7 @@ PRED_IMPL("thread_get_message", 3, thread_get_message, 0)
   struct timespec *dlop=NULL;
 
   return process_deadline_options(A3,&deadline,&dlop)
-    &&   thread_get_message__LD(A1, A2, dlop PASS_LD);
+    &&   thread_get_message(A1, A2, dlop);
 }
 
 
@@ -5105,10 +5183,10 @@ PRED_IMPL("thread_peek_message", 2, thread_peek_message_2, 0)
   message_queue *q;
   int rc;
 
-  if ( !get_message_queue__LD(A1, &q PASS_LD) )
+  if ( !get_message_queue(A1, &q) )
     fail;
 
-  rc = peek_message(q, A2 PASS_LD);
+  rc = peek_message(q, A2);
   release_message_queue(q);
   return rc;
 }
@@ -5164,8 +5242,9 @@ ensure_wait_area_module(Module module)
   return TRUE;
 }
 
+#define ensure_waiting_for(_) LDFUNC(ensure_waiting_for, _)
 static int
-ensure_waiting_for(ARG1_LD)
+ensure_waiting_for(DECL_LD)
 { if ( !LD->thread.waiting_for )
   { if ( !(LD->thread.waiting_for = malloc(sizeof(*LD->thread.waiting_for))) )
       return PL_no_memory();
@@ -5177,7 +5256,7 @@ ensure_waiting_for(ARG1_LD)
 }
 
 
-thread_dcell *
+static thread_dcell *
 register_waiting(Module m, PL_local_data_t *ld)
 { thread_dcell *c;
 
@@ -5205,7 +5284,7 @@ register_waiting(Module m, PL_local_data_t *ld)
   return c;
 }
 
-void
+static void
 unregister_waiting(Module m, PL_local_data_t *ld)
 { thread_dcell *c = ld->thread.waiting_for->registered;
 
@@ -5226,16 +5305,18 @@ unregister_waiting(Module m, PL_local_data_t *ld)
   }
 }
 
+#define add_wch(wch) LDFUNC(add_wch, wch)
 static int
-add_wch(thread_wait_channel *wch  ARG_LD)
+add_wch(DECL_LD thread_wait_channel *wch)
 { wch->signalled = FALSE;
   addBuffer(&LD->thread.waiting_for->channels, *wch, thread_wait_channel);
 
   return TRUE;
 }
 
+#define add_wait_for_module(m) LDFUNC(add_wait_for_module, m)
 static int
-add_wait_for_module(Module m ARG_LD)
+add_wait_for_module(DECL_LD Module m)
 { thread_wait_channel wch = {0};
 
   wch.type = TWF_MODULE;
@@ -5243,11 +5324,12 @@ add_wait_for_module(Module m ARG_LD)
   wch.generation = m->last_modified;
   set(m, M_WAITED_FOR);
 
-  return add_wch(&wch PASS_LD);
+  return add_wch(&wch);
 }
 
+#define thread_wait_preds(m, preds) LDFUNC(thread_wait_preds, m, preds)
 static int
-thread_wait_preds(Module m, term_t preds ARG_LD)
+thread_wait_preds(DECL_LD Module m, term_t preds)
 { term_t tail = PL_copy_term_ref(preds);
   term_t head = PL_new_term_ref();
 
@@ -5276,7 +5358,7 @@ thread_wait_preds(Module m, term_t preds ARG_LD)
 	if ( true(wch.obj.predicate, P_THREAD_LOCAL) )
 	  return PL_permission_error("thread_wait", "thread_local", head);
 	set(wch.obj.predicate, P_WAITED_FOR);
-	add_wch(&wch PASS_LD);
+	add_wch(&wch);
       } else
 	return FALSE;
     } else
@@ -5287,8 +5369,9 @@ thread_wait_preds(Module m, term_t preds ARG_LD)
 }
 
 
+#define unify_modified(t) LDFUNC(unify_modified, t)
 static int
-unify_modified(term_t t ARG_LD)
+unify_modified(DECL_LD term_t t)
 { thread_wait_for *twf;
 
   if ( (twf=LD->thread.waiting_for) )
@@ -5326,7 +5409,8 @@ static const opt_spec thread_wait_options[] =
   { NULL_ATOM,		0 }
 };
 
-static int wait_filter_satisfied(ARG1_LD);
+#define wait_filter_satisfied(_) LDFUNC(wait_filter_satisfied, _)
+static int wait_filter_satisfied(DECL_LD);
 
 static
 PRED_IMPL("thread_wait", 2, thread_wait, 0)
@@ -5358,7 +5442,12 @@ PRED_IMPL("thread_wait", 2, thread_wait, 0)
     Mark(fli_context->mark);
   }
 
-  if ( !ensure_waiting_for(PASS_LD1) ||
+  if ( LD->transaction.generation )
+    return PL_error("thread_wait", 2, "in transaction",
+		    ERR_PERMISSION,
+		    ATOM_thread, ATOM_wait, A1);
+
+  if ( !ensure_waiting_for() ||
        !ensure_wait_area_module(module) )
     return FALSE;
 
@@ -5367,18 +5456,18 @@ PRED_IMPL("thread_wait", 2, thread_wait, 0)
 		    ERR_PERMISSION,
 		    ATOM_thread, ATOM_wait, A1);
 
-  if ( wait_preds && !thread_wait_preds(module, wait_preds PASS_LD) )
+  if ( wait_preds && !thread_wait_preds(module, wait_preds) )
     goto out;
   if ( db == TRUE || isEmptyBuffer(&LD->thread.waiting_for->channels) )
-    add_wait_for_module(module, PASS_LD1);
+    add_wait_for_module(module);
 
   timespec_set_dbl(&retry, retry_every);
 
   LD->thread.waiting_for->signalled = FALSE;
   simpleMutexLock(&module->wait->mutex);
   for(;;)
-  { if ( (ign_filter || wait_filter_satisfied(PASS_LD1)) &&
-	 ( (rc = ((!modified || unify_modified(modified PASS_LD)) &&
+  { if ( (ign_filter || wait_filter_satisfied()) &&
+	 ( (rc = ((!modified || unify_modified(modified)) &&
 		  callProlog(NULL, A1, PL_Q_PASS_EXCEPTION, NULL))) ||
 	   PL_exception(0) ) )
       break;
@@ -5393,9 +5482,11 @@ PRED_IMPL("thread_wait", 2, thread_wait, 0)
     { case CV_INTR:
 	if ( PL_handle_signals() >= 0 )
 	  continue;
-        goto error;
+        rc = FALSE;
+        goto out_for_loop;
       case CV_TIMEDOUT:
-	break;
+	rc = FALSE;
+        goto out_for_loop;
       case CV_MAYBE:
 	ign_filter = TRUE;
       case CV_READY:
@@ -5404,7 +5495,7 @@ PRED_IMPL("thread_wait", 2, thread_wait, 0)
 	assert(0);
     }
   }
-error:
+out_for_loop:
   simpleMutexUnlock(&module->wait->mutex);
 
 out:
@@ -5415,7 +5506,7 @@ out:
 
 
 static int
-wait_filter_satisfied(ARG1_LD)
+wait_filter_satisfied(DECL_LD)
 { thread_wait_for *twf = LD->thread.waiting_for;
   int signalled = twf->signalled;
 
@@ -5433,7 +5524,9 @@ signal_waiting_thread(PL_local_data_t *ld, thread_wait_channel *wch)
   DEBUG(MSG_THREAD_WAIT, Sdprintf("Checking wakeup for %d\n",
 				  ld->thread.info->pl_tid));
 
-  if ( (twf=ld->thread.waiting_for) && !twf->signalled )
+  if ( (twf=ld->thread.waiting_for) &&
+       !twf->signalled &&
+       !ld->transaction.generation )
   { if ( wch->type == TWF_PREDICATE )
     { thread_wait_channel *ch = baseBuffer(&twf->channels, thread_wait_channel);
       size_t i, count = entriesBuffer(&twf->channels, thread_wait_channel);
@@ -5483,8 +5576,9 @@ typedef struct module_cell
 } module_cell;
 
 
+#define updating(m) LDFUNC(updating, m)
 static int
-updating(Module m ARG_LD)
+updating(DECL_LD Module m)
 { if ( LD->thread.waiting_for )
   { module_cell *mc;
 
@@ -5505,7 +5599,7 @@ signal_waiting_threads(Module m, thread_wait_channel *wch)
   int done = 0;
   int lock = !LD->thread.waiting_for || !LD->thread.waiting_for->registered;
 
-  if ( updating(m PASS_LD) )
+  if ( updating(m) )
     return 0;
 					/* TBD: check waiting on same module? */
   if ( lock )
@@ -5551,7 +5645,7 @@ PRED_IMPL("thread_update", 2, thread_update, PL_FA_TRANSPARENT)
   if ( mname )
     module = lookupModule(mname);
 
-  if ( !ensure_waiting_for(PASS_LD1) ||
+  if ( !ensure_waiting_for() ||
        !ensure_wait_area_module(module) )
     return FALSE;
 
@@ -5631,22 +5725,22 @@ error:
 int
 recursiveMutexInit(recursiveMutex *m)
 {
-#ifdef RECURSIVE_MUTEXES
   pthread_mutexattr_t *attr = NULL;
+
+#ifdef RECURSIVE_MUTEXES
   int rc;
 
   if ( (rc=recursive_attr(&attr)) )
     return rc;
 
-  return pthread_mutex_init(m, attr);
-
 #else /*RECURSIVE_MUTEXES*/
 
   m->owner = 0;
   m->count = 0;
-  return pthread_mutex_init(&(m->lock), NULL);
 
 #endif /* RECURSIVE_MUTEXES */
+
+  return pthread_mutex_init(&(m->lock), attr);
 }
 
 #endif /*NEED_RECURSIVE_MUTEX_INIT*/
@@ -5839,7 +5933,7 @@ PL_thread_attach_engine(PL_thread_attr_t *attr)
     if ( true(attr, PL_THREAD_NO_DEBUG) )
     { ldnew->_debugstatus.tracing   = FALSE;
       ldnew->_debugstatus.debugging = DBG_OFF;
-      set(&ldnew->prolog_flag.mask, PLFLAG_LASTCALL);
+      setPrologFlagMask_LD(ldnew, PLFLAG_LASTCALL);
       info->debug = FALSE;
     }
   }
@@ -6125,7 +6219,7 @@ gc_running(void)
 
 
 int
-isSignalledGCThread(int sig ARG_LD)
+isSignalledGCThread(DECL_LD int sig)
 { if ( gc_running() )
   { return (GD->thread.gc.requests & gc_sig_request(sig)) != 0;
   } else
@@ -6245,16 +6339,21 @@ PRED_IMPL("thread_statistics", 3, thread_statistics, 0)
   if ( k == ATOM_heapused )
     ld = LD;
   else if ( k == ATOM_cputime || k == ATOM_runtime )
-    ld->statistics.user_cputime = ThreadCPUTime(ld, CPU_USER);
+    ld->statistics.user_cputime = ThreadCPUTime(PASS_AS_LD(ld) CPU_USER);
   else if ( k == ATOM_system_time )
-    ld->statistics.system_cputime = ThreadCPUTime(ld, CPU_SYSTEM);
+    ld->statistics.system_cputime = ThreadCPUTime(PASS_AS_LD(ld) CPU_SYSTEM);
+  else if ( k == ATOM_warnings || k == ATOM_errors )
+  { PL_UNLOCK(L_THREAD);
+    return PL_unify_integer(A3, k == ATOM_warnings ? ld->statistics.warnings
+						   : ld->statistics.errors);
+  }
 
   if ( LD == ld )		/* self: unlock first to avoid deadlock */
   { PL_UNLOCK(L_THREAD);
-    return pl_statistics_ld(A2, A3, ld PASS_LD);
+    return pl_statistics_ld(A2, A3, ld);
   }
 
-  rval = pl_statistics_ld(A2, A3, ld PASS_LD);
+  rval = pl_statistics_ld(A2, A3, ld);
   PL_UNLOCK(L_THREAD);
 
   return rval;
@@ -6271,8 +6370,8 @@ PRED_IMPL("thread_statistics", 3, thread_statistics, 0)
 #define ntick 100.0
 
 double
-ThreadCPUTime(PL_local_data_t *ld, int which)
-{ PL_thread_info_t *info = ld->thread.info;
+ThreadCPUTime(DECL_LD int which)
+{ PL_thread_info_t *info = LD->thread.info;
   double t;
   FILETIME created, exited, kerneltime, usertime;
   HANDLE win_thread;
@@ -6311,8 +6410,8 @@ ThreadCPUTime(PL_local_data_t *ld, int which)
 #define NO_THREAD_SYSTEM_TIME 1
 
 double
-ThreadCPUTime(PL_local_data_t *ld, int which)
-{ PL_thread_info_t *info = ld->thread.info;
+ThreadCPUTime(DECL_LD int which)
+{ PL_thread_info_t *info = LD->thread.info;
 
   if ( which == CPU_SYSTEM )
     return 0.0;
@@ -6341,8 +6440,8 @@ ThreadCPUTime(PL_local_data_t *ld, int which)
 #include <mach/thread_act.h>
 
 double
-ThreadCPUTime(PL_local_data_t *ld, int which)
-{ PL_thread_info_t *info = ld->thread.info;
+ThreadCPUTime(DECL_LD int which)
+{ PL_thread_info_t *info = LD->thread.info;
 
   if ( info->has_tid )
   { kern_return_t error;
@@ -6484,8 +6583,8 @@ get_procps_entry(int tid)
 
 
 double
-ThreadCPUTime(PL_local_data_t *ld, int which)
-{ PL_thread_info_t *info = ld->thread.info;
+ThreadCPUTime(DECL_LD int which)
+{ PL_thread_info_t *info = LD->thread.info;
   procps_entry *e;
 
   if ( (e=get_procps_entry(info->pid)) )
@@ -6594,9 +6693,9 @@ SyncSystemCPU(int sig)
 #endif  /*LINUX_CPUCLOCKS*/
 
 double
-ThreadCPUTime(PL_local_data_t *ld, int which)
+ThreadCPUTime(DECL_LD int which)
 { GET_LD
-  PL_thread_info_t *info = ld->thread.info;
+  PL_thread_info_t *info = LD->thread.info;
 
 #ifdef NO_THREAD_SYSTEM_TIME
   if ( which == CPU_SYSTEM )
@@ -6833,7 +6932,7 @@ we need to scan the entire localization array.
 void
 destroyLocalDefinitions(Definition def)
 { GET_LD
-  LocalDefinitions ldefs = def->impl.local;
+  LocalDefinitions ldefs = def->impl.local.local;
   int b;
 
   for(b=0; b<MAX_BLOCKS; b++)
@@ -6940,7 +7039,13 @@ sizeof_local_definitions(PL_local_data_t *ld)
   size_t size = 0;
 
   for( ; ch; ch = ch->next)
-    size += sizeof_predicate(ch->definition);
+  { Definition def = ch->definition;
+    Definition local;
+
+    assert(true(def, P_THREAD_LOCAL));
+    if ( (local = getProcDefinitionForThread(def, ld->thread.info->pl_tid)) )
+      size += sizeof_predicate(local);
+  }
 
   return size;
 }
@@ -7003,7 +7108,7 @@ signalGCThread(int sig)
 }
 
 int
-isSignalledGCThread(int sig ARG_LD)
+isSignalledGCThread(DECL_LD int sig)
 { return PL_pending(sig);
 }
 
@@ -7082,7 +7187,7 @@ PL_cleanup_fork(void)
 }
 
 double
-ThreadCPUTime(PL_local_data_t *ld, int which) {
+ThreadCPUTime(DECL_LD int which) {
   return CpuTime(which);
 }
 
@@ -7139,7 +7244,7 @@ marking cost.
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 int
-cgc_thread_stats(cgc_stats *stats ARG_LD)
+cgc_thread_stats(DECL_LD cgc_stats *stats)
 {
 #ifdef O_PLMT
   int i;
@@ -7380,8 +7485,9 @@ free_predicate_references(PL_local_data_t *ld)
 }
 #endif /*O_PLMT*/
 
+#define cgcActivatePredicate(def, gen) LDFUNC(cgcActivatePredicate, def, gen)
 static void
-cgcActivatePredicate__LD(Definition def, gen_t gen ARG_LD)
+cgcActivatePredicate(DECL_LD Definition def, gen_t gen)
 { DirtyDefInfo ddi;
 
   if ( (ddi=lookupHTable(GD->procedures.dirty, def)) )
@@ -7390,7 +7496,7 @@ cgcActivatePredicate__LD(Definition def, gen_t gen ARG_LD)
 
 
 definition_ref *
-pushPredicateAccessObj(Definition def ARG_LD)
+pushPredicateAccessObj(DECL_LD Definition def)
 { definition_refs *refs = &LD->predicate_references;
   definition_ref *dref;
   size_t top = refs->top+1;
@@ -7399,12 +7505,15 @@ pushPredicateAccessObj(Definition def ARG_LD)
   DEBUG(MSG_CGC_PRED_REF,
 	Sdprintf("pushPredicateAccess(%s)\n", predicateName(def)));
 
+  if ( top >= ((size_t)1<<MAX_BLOCKS) - (LD->exception.processing ? 0 : 1000) )
+    return PL_representation_error("predicate references"),NULL;
+
   if ( !refs->blocks[idx] )
   { size_t bs = (size_t)1<<idx;
     definition_ref *newblock;
 
     if ( !(newblock=PL_malloc_uncollectable(bs*sizeof(definition_ref))) )
-      outOfCore();
+      return PL_no_memory(),NULL;
 
     memset(newblock, 0, bs*sizeof(definition_ref));
     if ( !COMPARE_AND_SWAP_PTR(&refs->blocks[idx], NULL, newblock-bs) )
@@ -7414,19 +7523,13 @@ pushPredicateAccessObj(Definition def ARG_LD)
   enterDefinition(def);			/* probably not needed in the end */
   dref = &refs->blocks[idx][top];
   dref->predicate  = def;
-  dref->generation = current_generation(def PASS_LD);
+  dref->generation = current_generation(def);
   refs->top = top;
   do
-  { dref->generation = current_generation(def PASS_LD);
-  } while ( dref->generation != current_generation(def PASS_LD) );
+  { dref->generation = current_generation(def);
+  } while ( dref->generation != current_generation(def) );
 
   return dref;
-}
-
-
-gen_t
-pushPredicateAccess__LD(Definition def ARG_LD)
-{ return pushPredicateAccessObj(def PASS_LD)->generation;
 }
 
 
@@ -7448,7 +7551,7 @@ enumeration completes.
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 void
-popPredicateAccess__LD(Definition def ARG_LD)
+popPredicateAccess(DECL_LD Definition def)
 { definition_refs *refs = &LD->predicate_references;
   definition_ref *dref;
 
@@ -7484,7 +7587,7 @@ out:
 }
 
 size_t
-popNPredicateAccess__LD(size_t n ARG_LD)
+popNPredicateAccess(DECL_LD size_t n)
 { definition_refs *refs = &LD->predicate_references;
 
   DEBUG(MSG_CGC_PRED_REF,
@@ -7534,7 +7637,7 @@ markAccessedPredicates(PL_local_data_t *ld)
     definition_ref dref = *drefp;	/* struct copy */
 
     if ( is_pointer_like(dref.predicate) )
-      cgcActivatePredicate__LD(dref.predicate, dref.generation PASS_LD);
+      cgcActivatePredicate(dref.predicate, dref.generation);
   }
 }
 

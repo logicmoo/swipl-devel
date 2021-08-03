@@ -1123,14 +1123,14 @@ rlc_wnd_proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 	  if ( rlc_kill(b) )
 	    return 0;
 	  break;
-      }
+	default:
+	  if ( (name = lookupMenuId(item)) )
+	  { if ( _rlc_menu_hook )
+	    { (*_rlc_menu_hook)(b, name);
+	    }
 
-      if ( (name = lookupMenuId(item)) )
-      { if ( _rlc_menu_hook )
-	{ (*_rlc_menu_hook)(b, name);
-	}
-
-	return 0;
+	    return 0;
+	  }
       }
 
       break;
@@ -1428,8 +1428,14 @@ rlc_wnd_proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 static int
 rlc_get_message(MSG *msg, HWND hwnd, UINT low, UINT high)
 { int rc;
+
 again:
-  if ( (rc=GetMessage(msg, hwnd, low, high)) )
+  if ( (rc=PeekMessage(msg, hwnd, low, WM_RLC_INPUT, PM_REMOVE)) )
+  { if ( _rlc_message_hook &&
+	 (*_rlc_message_hook)(msg->hwnd, msg->message,
+			      msg->wParam, msg->lParam) )
+      goto again;
+  } else if ( (rc=GetMessage(msg, hwnd, low, high)) )
   { if ( _rlc_message_hook &&
 	 (*_rlc_message_hook)(msg->hwnd, msg->message,
 			      msg->wParam, msg->lParam) )
@@ -2322,6 +2328,7 @@ rlc_make_buffer(int w, int h)
   b->imodeswitch    = FALSE;
   b->lhead	    = NULL;
   b->ltail	    = NULL;
+  InitializeCriticalSection(&b->lock);
 
   memset(b->lines, 0, sizeof(text_line) * h);
   for(i=0; i<h; i++)
@@ -3426,12 +3433,14 @@ rlc_write(rlc_console c, TCHAR *buf, size_t count)
   if ( !b )
     return -1;
 
+  EnterCriticalSection(&b->lock);
   for(s=buf, e=&buf[count]; s<e; s++)
   { if ( *s == '\n' )
       b->promptlen = 0;
     else if ( b->promptlen < MAXPROMPT-1 )
       b->promptbuf[b->promptlen++] = *s;
   }
+  LeaveCriticalSection(&b->lock);
 
   if ( b->window )
   { if ( SendMessageTimeout(b->window,
@@ -3468,6 +3477,7 @@ free_rlc_data(RlcData b)
   }
   if ( b->read_buffer.line )
     free(b->read_buffer.line);
+  DeleteCriticalSection(&b->lock);
 
   free(b);
 }

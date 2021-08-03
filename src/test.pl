@@ -43,7 +43,12 @@
 :- use_module(library(option)).
 :- use_module(library(error)).
 
-:- set_test_options([load(always), silent(true), sto(true), cleanup(true)]).
+:- set_test_options([ load(always),
+		      silent(true),
+		      sto(true),
+		      cleanup(true),
+		      concurrent(true)
+		    ]).
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 SWI-Prolog test file.  A test is a clause of the form:
@@ -2683,6 +2688,7 @@ run_scripts([H|T]) :-
 	run_scripts(T).
 
 script_failed(File, fail) :-
+	!,
 	format(user_error, '~NScript ~w failed~n', [File]),
 	assert(failed(script(File))).
 script_failed(File, Except) :-
@@ -2810,7 +2816,8 @@ testdir('Tests/xsb/table_tests').
 testdir('Tests/xsb/incremental_tests').
 testdir('Tests/xsb/nonmt_tests').
 testdir('Tests/xsb/sub_tests').
-
+testdir('Tests/rational') :-
+	current_prolog_flag(bounded, false).
 
 :- dynamic
 	failed/1,

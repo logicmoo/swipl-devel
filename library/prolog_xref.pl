@@ -877,6 +877,20 @@ process((Head :- Body), Src) :-
     !,
     assert_defined(Src, Head),
     process_body(Body, Head, Src).
+process((Left => Body), Src) :-
+    !,
+    (   nonvar(Left),
+        Left = (Head, Guard)
+    ->  assert_defined(Src, Head),
+        process_body(Guard, Head, Src),
+        process_body(Body, Head, Src)
+    ;   assert_defined(Src, Left),
+        process_body(Body, Left, Src)
+    ).
+process(?=>(Head, Body), Src) :-
+    !,
+    assert_defined(Src, Head),
+    process_body(Body, Head, Src).
 process('$source_location'(_File, _Line):Clause, Src) :-
     !,
     process(Clause, Src).
@@ -1196,6 +1210,30 @@ xref_meta_src(Head, Called, _) :-
     Extra is Arity - 1,
     arg(1, Head, G),
     Called = [G+Extra].
+xref_meta_src(Head, Called, _) :-
+    predicate_property(user:Head, meta_predicate(Meta)),
+    !,
+    Meta =.. [_|Args],
+    meta_args(Args, 1, Head, Called).
+
+meta_args([], _, _, []).
+meta_args([H0|T0], I, Head, [H|T]) :-
+    xargs(H0, N),
+    !,
+    arg(I, Head, A),
+    (   N == 0
+    ->  H = A
+    ;   H = (A+N)
+    ),
+    I2 is I+1,
+    meta_args(T0, I2, Head, T).
+meta_args([_|T0], I, Head, T) :-
+    I2 is I+1,
+    meta_args(T0, I2, Head, T).
+
+xargs(N, N) :- integer(N), !.
+xargs(//, 2).
+xargs(^, 0).
 
 apply_pred(call).                               % built-in
 apply_pred(maplist).                            % library(apply_macros)
@@ -2069,7 +2107,10 @@ negate(else_false, else_false).
 public_list([(:- module(Module, Export0))|Decls], Path,
             Module, Meta, MT, Export, Rest, Public, PT) :-
     !,
-    append(Export0, Reexport, Export),
+    (   is_list(Export0)
+    ->  append(Export0, Reexport, Export)
+    ;   Reexport = Export
+    ),
     public_list_(Decls, Path, Meta, MT, Reexport, Rest, Public, PT).
 public_list([(:- encoding(_))|Decls], Path,
             Module, Meta, MT, Export, Rest, Public, PT) :-

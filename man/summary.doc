@@ -18,6 +18,8 @@ suggest predicates from a keyword.
 \begin{summarylist}{ll}
 \predicatesummary{@}{2}{Call using calling context}
 \predicatesummary{!}{0}{Cut (discard choicepoints)}
+\predicatesummary{$}{0}{Discard choicepoints and demand deterministic success}
+\predicatesummary{$}{1}{Verify goal succeeds deterministically}
 \oppredsummary{,}{2}{xfy}{1000}{Conjunction of goals}
 \oppredsummary{->}{2}{xfy}{1050}{If-then-else}
 \oppredsummary{*->}{2}{xfy}{1050}{Soft-cut}
@@ -221,6 +223,7 @@ suggest predicates from a keyword.
 \predicatesummary{delete_directory}{1}{Remove a folder from the file system}
 \predicatesummary{delete_file}{1}{Remove a file from the file system}
 \predicatesummary{delete_import_module}{2}{Remove module from import list}
+\predicatesummary{det}{1}{Declare predicates as deterministic}
 \predicatesummary{deterministic}{1}{Test deterministicy of current clause}
 \predicatesummary{dif}{2}{Constrain two terms to be different}
 \predicatesummary{directory_files}{2}{Get entries of a directory/folder}
@@ -306,6 +309,7 @@ suggest predicates from a keyword.
 \predicatesummary{freeze}{2}{Delay execution until variable is bound}
 \predicatesummary{frozen}{2}{Query delayed goals on var}
 \predicatesummary{functor}{3}{Get name and arity of a term or construct a term}
+\predicatesummary{functor}{4}{Get name and arity of a term or construct a term}
 \predicatesummary{garbage_collect}{0}{Invoke the garbage collector}
 \predicatesummary{garbage_collect_atoms}{0}{Invoke the atom garbage collector}
 \predicatesummary{garbage_collect_clauses}{0}{Invoke clause garbage collector}
@@ -632,6 +636,7 @@ suggest predicates from a keyword.
 \predicatesummary{shell}{1}{Execute OS command}
 \predicatesummary{shell}{2}{Execute OS command}
 \predicatesummary{shift}{1}{Shift control to the closest reset/3}
+\predicatesummary{shift_for_copy}{1}{Shift control to the closest reset/3}
 \predicatesummary{show_profile}{1}{Show results of the profiler}
 \predicatesummary{size_abstract_term}{3}{Abstract a term (tabling support)}
 \predicatesummary{size_file}{2}{Get size of a file in characters}
@@ -731,6 +736,7 @@ suggest predicates from a keyword.
 \predicatesummary{trace}{2}{Set/Clear trace point on ports}
 \predicatesummary{tracing}{0}{Query status of the tracer}
 \predicatesummary{transaction}{1}{Run goal in a transaction}
+\predicatesummary{transaction}{2}{Run goal in a transaction}
 \predicatesummary{transaction}{3}{Run goal in a transaction}
 \predicatesummary{transaction_updates}{1}{Updates to be committed in a transaction}
 \predicatesummary{trie_delete}{3}{Remove term from trie}
@@ -746,7 +752,8 @@ suggest predicates from a keyword.
 \predicatesummary{trie_property}{2}{Examine a trie's properties}
 \predicatesummary{trie_update}{3}{Update associated value in trie}
 \predicatesummary{trie_term}{2}{Get term from a trie by handle}
-\predicatesummary{trim_stacks}{0}{Release unused memory resources}
+\predicatesummary{trim_heap}{0}{Release unused malloc() resources}
+\predicatesummary{trim_stacks}{0}{Release unused stack resources}
 \predicatesummary{tripwire}{2}{\hook{prolog} Handle a tabling tripwire event}
 \predicatesummary{true}{0}{Succeed}
 \predicatesummary{tspy}{1}{Set spy point and enable debugging in all threads}
@@ -757,6 +764,7 @@ suggest predicates from a keyword.
 \predicatesummary{tty_size}{2}{Get row/column size of the terminal}
 \predicatesummary{ttyflush}{0}{Flush output on terminal}
 \predicatesummary{undefined}{0}{Well Founded Semantics: true nor false}
+\predicatesummary{undo}{1}{Schedule goal for backtracking}
 \predicatesummary{unify_with_occurs_check}{2}{Logically sound unification}
 \predicatesummary{unifiable}{3}{Determining binding required for unification}
 \predicatesummary{unknown}{2}{Trap undefined predicates}
@@ -792,6 +800,7 @@ suggest predicates from a keyword.
 \predicatesummary{win_folder}{2}{Win32: get special folder by CSIDL}
 \predicatesummary{win_insert_menu}{2}{swipl-win.exe: add menu}
 \predicatesummary{win_insert_menu_item}{4}{swipl-win.exe: add item to menu}
+\predicatesummary{win_process_modules}{1}{Win32 get .exe and .dll files of the process}
 \predicatesummary{win_shell}{2}{Win32: open document through Shell}
 \predicatesummary{win_shell}{3}{Win32: open document through Shell}
 \predicatesummary{win_registry_get_value}{3}{Win32: get registry value}

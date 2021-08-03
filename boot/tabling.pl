@@ -3,9 +3,10 @@
     Author:        Benoit Desouter <Benoit.Desouter@UGent.be>
                    Jan Wielemaker (SWI-Prolog port)
                    Fabrizio Riguzzi (mode directed tabling)
-    Copyright (c) 2016-2020, Benoit Desouter,
+    Copyright (c) 2016-2021, Benoit Desouter,
                              Jan Wielemaker,
                              Fabrizio Riguzzi
+                             SWI-Prolog Solutions b.v.
     All rights reserved.
 
     Redistribution and use in source and binary forms, with or without
@@ -63,7 +64,7 @@
             '$tbl_answer'/4,            % +Trie, -Return, -ModeArgs, -Delay
 
             '$wrap_tabled'/2,		% :Head, +Mode
-            '$moded_wrap_tabled'/4,	% :Head, +ModeTest, +Variant, +Moded
+            '$moded_wrap_tabled'/5,	% :Head, +Opts, +ModeTest, +Varnt, +Moded
             '$wfs_call'/2,              % :Goal, -Delays
 
             '$set_table_wrappers'/1,    % :Head
@@ -124,7 +125,10 @@ wl_goal(WorkList, Goal, Skeleton) :-
 
 trie_goal(ATrie, Goal, Skeleton) :-
     '$tbl_table_status'(ATrie, _Status, M:Variant, Skeleton),
-    M:'$table_mode'(Goal0, Variant, _Moded),
+    (   M:'$table_mode'(Goal0, Variant, _Moded)
+    ->  true
+    ;   Goal0 = Variant                 % dynamic IDG nodes
+    ),
     unqualify_goal(M:Goal0, user, Goal).
 
 delay_goals(List, Goal) :-
@@ -137,12 +141,18 @@ user_goal(Goal, UGoal) :-
     prolog:portray/1.
 
 user:portray(ATrie) :-
-    '$is_answer_trie'(ATrie),
+    '$is_answer_trie'(ATrie, _),
     trie_goal(ATrie, Goal, _Skeleton),
-    format('~q for ~p', [ATrie, Goal]).
+    (   '$idg_falsecount'(ATrie, FalseCount)
+    ->  (   '$idg_forced'(ATrie)
+        ->  format('~q [fc=~d/F] for ~p', [ATrie, FalseCount, Goal])
+        ;   format('~q [fc=~d] for ~p', [ATrie, FalseCount, Goal])
+        )
+    ;   format('~q for ~p', [ATrie, Goal])
+    ).
 user:portray(Cont) :-
     compound(Cont),
-    Cont =.. ['$cont$', Clause, PC | Args],
+    compound_name_arguments(Cont, '$cont$', [_Context, Clause, PC | Args]),
     clause_property(Clause, file(File)),
     file_base_name(File, Base),
     clause_property(Clause, line_count(Line)),
@@ -264,7 +274,11 @@ untable(Name/Arity, M) :-
         retractall(M:'$tabled'(Head, _TMode)),
         retractall(M:'$table_mode'(Head, _Variant, _Moded)),
         unwrap_predicate(M:Name/Arity, table),
-        '$set_predicate_attribute'(M:Head, tabled, false)
+        '$set_predicate_attribute'(M:Head, tabled, false),
+        '$set_predicate_attribute'(M:Head, opaque, false),
+        '$set_predicate_attribute'(M:Head, incremental, false),
+        '$set_predicate_attribute'(M:Head, monotonic, false),
+        '$set_predicate_attribute'(M:Head, lazy, false)
     ;   true
     ).
 untable(Head, M) :-
@@ -312,6 +326,9 @@ set_pattributes(Head, Options) :-
         get_dict(Attr, Options, Value),
         '$set_predicate_attribute'(Head, Attr, Value),
         fail
+    ;   current_prolog_flag(table_monotonic, lazy),
+        '$set_predicate_attribute'(Head, lazy, true),
+        fail
     ;   true
     ).
 
@@ -322,6 +339,8 @@ tabled_attribute(max_answers).
 tabled_attribute(subgoal_abstract).
 tabled_attribute(answer_abstract).
 tabled_attribute(monotonic).
+tabled_attribute(opaque).
+tabled_attribute(lazy).
 
 %!  start_tabling(:Closure, :Wrapper, :Implementation)
 %
@@ -359,7 +378,7 @@ start_tabling_2(Closure, Wrapper, Worker, Trie, Status, Skeleton) :-
     ;   Status == invalid
     ->  reeval(Trie, Wrapper, Skeleton)
     ;   % = run_follower, but never fresh and Status is a worklist
-        shift(call_info(Skeleton, Status))
+        shift_for_copy(call_info(Skeleton, Status))
     ).
 
 create_table(Trie, Fresh, Skeleton, Wrapper, Worker) :-
@@ -411,7 +430,7 @@ start_subsumptive_tabling(Closure, Wrapper, Worker) :-
         ;   Status == invalid
         ->  reeval(Trie, Wrapper, Skeleton),
             trie_gen_compiled(Trie, Skeleton)
-        ;   shift(call_info(Skeleton, Status))
+        ;   shift_for_copy(call_info(Skeleton, Status))
         )
     ;   more_general_table(Wrapper, ATrie),
         '$tbl_table_status'(ATrie, complete, Wrapper, Skeleton)
@@ -423,7 +442,7 @@ start_subsumptive_tabling(Closure, Wrapper, Worker) :-
             Wrapper = GenWrapper,
             '$tbl_answer_update_dl'(ATrie, GenSkeleton)
         ;   wrapper_skeleton(GenWrapper, GenSkeleton, Wrapper, Skeleton),
-            shift(call_info(GenSkeleton, Skeleton, Status)),
+            shift_for_copy(call_info(GenSkeleton, Skeleton, Status)),
             unify_subsumptive(Skeleton, GenSkeleton)
         )
     ;   start_tabling(Closure, Wrapper, Worker)
@@ -472,7 +491,7 @@ start_abstract_tabling(Closure, Wrapper, Worker) :-
         reeval(ATrie, GenWrapper, GenSkeleton),
         Wrapper = GenWrapper,
         '$tbl_answer_update_dl'(ATrie, Skeleton)
-    ;   shift(call_info(GenSkeleton, Skeleton, Status)),
+    ;   shift_for_copy(call_info(GenSkeleton, Skeleton, Status)),
         unify_subsumptive(Skeleton, GenSkeleton)
     ).
 
@@ -558,7 +577,7 @@ run_leader(Skeleton, Worker, fresh(SCC, Worklist), Status, Clause) :-
     (   Status == merged
     ->  tdebug(merge, 'Turning leader ~p into follower', [Goal]),
         '$tbl_wkl_make_follower'(Worklist),
-        shift(call_info(Skeleton, Worklist))
+        shift_for_copy(call_info(Skeleton, Worklist))
     ;   true                                    % completed
     ).
 
@@ -622,8 +641,8 @@ delim(Skeleton, Worker, WorkList, Delays) :-
 %   As start_tabling/2, but in addition separates the data stored in the
 %   answer trie in the Variant and ModeArgs.
 
-'$moded_wrap_tabled'(Head, ModeTest, WrapperNoModes, ModeArgs) :-
-    '$set_predicate_attribute'(Head, tabled, true),
+'$moded_wrap_tabled'(Head, Options, ModeTest, WrapperNoModes, ModeArgs) :-
+    set_pattributes(Head, Options),
     '$wrap_predicate'(Head, table, Closure, Wrapped,
                       (   ModeTest,
                           start_moded_tabling(Closure, Head, Wrapped,
@@ -632,7 +651,21 @@ delim(Skeleton, Worker, WorkList, Delays) :-
 
 
 start_moded_tabling(Closure, Wrapper, Worker, WrapperNoModes, ModeArgs) :-
-    '$tbl_moded_variant_table'(Closure, WrapperNoModes, Trie, Status, Skeleton),
+    '$tbl_moded_variant_table'(Closure, WrapperNoModes, Trie,
+                               Status, Skeleton, IsMono),
+    (   IsMono == true
+    ->  shift(dependency(Skeleton/ModeArgs, Trie, Mono)),
+        (   Mono == true
+        ->  tdebug(monotonic, 'Monotonic new answer: ~p', [Skeleton])
+        ;   start_moded_tabling_2(Closure, Wrapper, Worker, ModeArgs,
+                                  Trie, Status, Skeleton)
+        )
+    ;   start_moded_tabling_2(Closure, Wrapper, Worker, ModeArgs,
+                              Trie, Status, Skeleton)
+    ).
+
+start_moded_tabling_2(_Closure, Wrapper, Worker, ModeArgs,
+                      Trie, Status, Skeleton) :-
     (   Status == complete
     ->  moded_gen_answer(Trie, Skeleton, ModeArgs)
     ;   functor(Status, fresh, 2)
@@ -646,10 +679,10 @@ start_moded_tabling(Closure, Wrapper, Worker, WrapperNoModes, ModeArgs) :-
                [Wrapper, ModeArgs, LStatus]),
         moded_done_leader(LStatus, Status, Skeleton, ModeArgs, Trie)
     ;   Status == invalid
-    ->  reeval(Trie),
+    ->  reeval(Trie, Wrapper, Skeleton),
         moded_gen_answer(Trie, Skeleton, ModeArgs)
     ;   % = run_follower, but never fresh and Status is a worklist
-        shift(call_info(Skeleton/ModeArgs, Status))
+        shift_for_copy(call_info(Skeleton/ModeArgs, Status))
     ).
 
 :- public
@@ -682,7 +715,7 @@ moded_run_leader(Wrapper, SkeletonMA, Worker, fresh(SCC, Worklist), Status) :-
     (   Status == merged
     ->  tdebug(merge, 'Turning leader ~p into follower', [Wrapper]),
         '$tbl_wkl_make_follower'(Worklist),
-        shift(call_info(SkeletonMA, Worklist))
+        shift_for_copy(call_info(SkeletonMA, Worklist))
     ;   true                                    % completed
     ).
 
@@ -814,8 +847,10 @@ completion_step(SourceWL) :-
 
 tnot(Goal0) :-
     '$tnot_implementation'(Goal0, Goal),        % verifies Goal is tabled
-    (   '$tbl_existing_variant_table'(_, Goal, Trie, Status, Skeleton)
-    ->  (   '$tbl_answer_dl'(Trie, _, true)
+    (   '$tbl_existing_variant_table'(_, Goal, Trie, Status, Skeleton),
+        Status \== invalid
+    ->  '$idg_add_edge'(Trie),
+        (   '$tbl_answer_dl'(Trie, _, true)
         ->  fail
         ;   '$tbl_answer_dl'(Trie, _, _)
         ->  tdebug(tnot, 'tnot: adding ~p to delay list', [Goal]),
@@ -858,7 +893,7 @@ floundering(Goal) :-
 negation_suspend(Wrapper, Skeleton, Worklist) :-
     tdebug(tnot, 'negation_suspend ~p (wl=~p)', [Wrapper, Worklist]),
     '$tbl_wkl_negative'(Worklist),
-    shift(call_info(Skeleton, tnot(Worklist))),
+    shift_for_copy(call_info(Skeleton, tnot(Worklist))),
     tdebug(tnot, 'negation resume ~p (wl=~p)', [Wrapper, Worklist]),
     '$tbl_wkl_is_false'(Worklist).
 
@@ -1100,20 +1135,24 @@ current_table(Variant, Trie) :-
     current_table_lookup(Variant, Trie),
     !.
 
-current_table_gen(Variant, Trie) :-
+current_table_gen(M:Variant, Trie) :-
     '$tbl_local_variant_table'(VariantTrie),
-    trie_gen(VariantTrie, Variant, Trie).
-current_table_gen(Variant, Trie) :-
+    trie_gen(VariantTrie, M:NonModed, Trie),
+    M:'$table_mode'(Variant, NonModed, _Moded).
+current_table_gen(M:Variant, Trie) :-
     '$tbl_global_variant_table'(VariantTrie),
-    trie_gen(VariantTrie, Variant, Trie),
-    \+ '$tbl_table_status'(Trie, fresh). % shared tables are not destroyed
+    trie_gen(VariantTrie, M:NonModed, Trie),
+    \+ '$tbl_table_status'(Trie, fresh), % shared tables are not destroyed
+    M:'$table_mode'(Variant, NonModed, _Moded).
 
-current_table_lookup(Variant, Trie) :-
+current_table_lookup(M:Variant, Trie) :-
+    M:'$table_mode'(Variant, NonModed, _Moded),
     '$tbl_local_variant_table'(VariantTrie),
-    trie_lookup(VariantTrie, Variant, Trie).
-current_table_lookup(Variant, Trie) :-
+    trie_lookup(VariantTrie, M:NonModed, Trie).
+current_table_lookup(M:Variant, Trie) :-
+    M:'$table_mode'(Variant, NonModed, _Moded),
     '$tbl_global_variant_table'(VariantTrie),
-    trie_lookup(VariantTrie, Variant, Trie),
+    trie_lookup(VariantTrie, NonModed, Trie),
     \+ '$tbl_table_status'(Trie, fresh).
 
 ct_generate(M:Variant) :-
@@ -1191,7 +1230,7 @@ wrappers(ModeDirectedSpec, Module, Opts) -->
       (   ModeTest == true
       ->  WrapClause = '$wrap_tabled'(Module:Head, Opts),
           TVariant = Head
-      ;   WrapClause = '$moded_wrap_tabled'(Module:Head, ModeTest,
+      ;   WrapClause = '$moded_wrap_tabled'(Module:Head, Opts, ModeTest,
                                             Module:Variant, Moded),
           TVariant = Variant
       )
@@ -1260,13 +1299,16 @@ table_options(variant, Opts0, Opts1) :-
     put_dict(mode, Opts0, variant, Opts1).
 table_options(incremental, Opts0, Opts1) :-
     !,
-    put_dict(incremental, Opts0, true, Opts1).
+    put_dict(#{incremental:true,opaque:false}, Opts0, Opts1).
 table_options(monotonic, Opts0, Opts1) :-
     !,
     put_dict(monotonic, Opts0, true, Opts1).
 table_options(opaque, Opts0, Opts1) :-
     !,
-    put_dict(incremental, Opts0, false, Opts1).
+    put_dict(#{incremental:false,opaque:true}, Opts0, Opts1).
+table_options(lazy, Opts0, Opts1) :-
+    !,
+    put_dict(lazy, Opts0, true, Opts1).
 table_options(dynamic, Opts0, Opts1) :-
     !,
     put_dict(dynamic, Opts0, true, Opts1).
@@ -1496,7 +1538,8 @@ sum(S0, S1, S) :- S is S0+S1.
 %   This is required both for incremental and monotonic tabling.
 
 '$set_table_wrappers'(Pred) :-
-    (   '$get_predicate_attribute'(Pred, incremental, 1)
+    (   '$get_predicate_attribute'(Pred, incremental, 1),
+        \+ '$get_predicate_attribute'(Pred, opaque, 1)
     ->  wrap_incremental(Pred)
     ;   unwrap_incremental(Pred)
     ),
@@ -1532,8 +1575,8 @@ mon_assert_dep(dependency(SrcSkel, SrcTrie, IsMono), Cont, Skel, ATrie) :-
 %   distinguish normal tabled call from propagation.
 
 monotonic_affects(SrcTrie, SrcSkel, IsMono, Cont, Skel, ATrie) :-
-    '$idg_mono_affects'(SrcTrie, ATrie,
-                        dependency(SrcSkel, IsMono, Cont, Skel)).
+    '$idg_mono_affects_eager'(SrcTrie, ATrie,
+                              dependency(SrcSkel, IsMono, Cont, Skel)).
 
 %!  monotonic_dyn_affects(:Head, -Continuation, -Return, -ATrie)
 %
@@ -1541,8 +1584,8 @@ monotonic_affects(SrcTrie, SrcSkel, IsMono, Cont, Skel, ATrie) :-
 
 monotonic_dyn_affects(Head, Cont, Skel, ATrie) :-
     dyn_affected(Head, DTrie),
-    '$idg_mono_affects'(DTrie, ATrie,
-                        dependency(Head, Cont, Skel)).
+    '$idg_mono_affects_eager'(DTrie, ATrie,
+                              dependency(Head, Cont, Skel)).
 
 %!  wrap_monotonic(:Head)
 %
@@ -1567,6 +1610,12 @@ unwrap_monotonic(Head) :-
     ;   true
     ).
 
+%!  '$start_monotonic'(+Head, +Wrapped)
+%
+%   This is called the monotonic wrapper   around a dynamic predicate to
+%   collect the dependencies  between  the   dynamic  predicate  and the
+%   monotonic tabled predicates.
+
 '$start_monotonic'(Head, Wrapped) :-
     (   '$tbl_collect_mono_dep'
     ->  shift(dependency(Head)),
@@ -1576,27 +1625,43 @@ unwrap_monotonic(Head) :-
     ;   Wrapped
     ).
 
+%!  monotonic_update(+Action, +ClauseRef)
+%
+%   Trap changes to the monotonic dynamic predicate and forward them.
+
+:- public monotonic_update/2.
 monotonic_update(Action, ClauseRef) :-
     (   atomic(ClauseRef)                       % avoid retractall, start(_)
     ->  '$clause'(Head, _Body, ClauseRef, _Bindings),
-        mon_propagate(Action, Head)
+        mon_propagate(Action, Head, ClauseRef)
     ;   true
     ).
 
-%!  mon_propagate(+Action, +Head)
+%!  mon_propagate(+Action, +Head, +ClauseRef)
 %
 %   Handle changes to a dynamic predicate as part of monotonic
 %   updates.
 
-mon_propagate(Action, Head) :-
+mon_propagate(Action, Head, ClauseRef) :-
     assert_action(Action),
     !,
     setup_call_cleanup(
         '$tbl_propagate_start'(Old),
-        propagate_assert(Head),
-        '$tbl_propagate_end'(Old)).
-mon_propagate(retract, Head) :-
-    mon_abolish_dependents(Head).
+        propagate_assert(Head),                 % eager monotonic dependencies
+        '$tbl_propagate_end'(Old)),
+    forall(dyn_affected(Head, ATrie),
+           '$mono_idg_changed'(ATrie, ClauseRef)). % lazy monotonic dependencies
+mon_propagate(retract, Head, _) :-
+    !,
+    mon_invalidate_dependents(Head).
+mon_propagate(rollback(Action), Head, _) :-
+    mon_propagate_rollback(Action, Head).
+
+mon_propagate_rollback(Action, _Head) :-
+    assert_action(Action),
+    !.
+mon_propagate_rollback(retract, Head) :-
+    mon_invalidate_dependents(Head).
 
 assert_action(asserta).
 assert_action(assertz).
@@ -1609,10 +1674,29 @@ propagate_assert(Head) :-
     tdebug(monotonic, 'Asserted ~p', [Head]),
     (   monotonic_dyn_affects(Head, Cont, Skel, ATrie),
         tdebug(monotonic, 'Propagating dyn ~p to ~p', [Head, ATrie]),
+        '$idg_set_current'(_, ATrie),
         pdelim(Cont, Skel, ATrie),
         fail
     ;   true
     ).
+
+%!  incr_propagate_assert(+Head) is det.
+%
+%   Propagate assertion of a dynamic clause with head Head, both
+%   through eager and dynamic tables.
+
+incr_propagate_assert(Head) :-
+    tdebug(monotonic, 'New dynamic answer ~p', [Head]),
+    (   dyn_affected(Head, DTrie),
+         '$idg_mono_affects'(DTrie, ATrie,
+                             dependency(Head, Cont, Skel)),
+        tdebug(monotonic, 'Propagating dyn ~p to ~p', [Head, ATrie]),
+        '$idg_set_current'(_, ATrie),
+        pdelim(Cont, Skel, ATrie),
+        fail
+    ;   true
+    ).
+
 
 %!  propagate_answer(+SrcTrie, +SrcSkel) is det.
 %
@@ -1645,80 +1729,22 @@ pdelim(Worker, Skel, ATrie) :-
         pdelim(Cont, Skel, ATrie)
     ).
 
-%!  mon_abolish_dependents(+HeadOrTrie)
+%!  mon_invalidate_dependents(+Head)
 %
-%   Abolish all dependency relations from HeadOrTrie and their tables.
-%
-%   @tbd Move to C
+%   A non-monotonic operation was done on Head. Invalidate all dependent
+%   tables, preparing for normal incremental   reevaluation  on the next
+%   cycle.
 
-mon_abolish_dependents(Node) :-
-    dependent_tables([Node], [], Tables),
-    forall('$member'(ATrie, Tables),
-           '$tbl_destroy_table'(ATrie)).
-
-dependent_tables([], Tables, Tables) :-
-    !.
-dependent_tables([Node|T], Tables0, Tables) :-
-    (   is_trie(Node)
-    ->  findall(ATrie,
-                monotonic_affects(Node, _Ret0, _IsMono, _ContinuationT, _RetT, ATrie),
-                Tries)
-    ;   findall(ATrie,
-                monotonic_dyn_affects(Node, _ContinuationD, _RetD, ATrie),
-                Tries)
-    ),
-    sort(Tries, STries),
-    ord_subtract(STries, Tables0, New),
-    ord_union(T, New, Agenda),
-    ord_union(New, Tables0, Tables1),
-    dependent_tables(Agenda, Tables1, Tables).
-
-
-%!  ord_subtract(+InOSet, +NotInOSet, -Diff)
-%   ordered set difference
-
-ord_subtract([], _Not, []).
-ord_subtract([H1|T1], L2, Diff) :-
-    diff21(L2, H1, T1, Diff).
-
-diff21([], H1, T1, [H1|T1]).
-diff21([H2|T2], H1, T1, Diff) :-
-    compare(Order, H1, H2),
-    diff3(Order, H1, T1, H2, T2, Diff).
-
-diff12([], _H2, _T2, []).
-diff12([H1|T1], H2, T2, Diff) :-
-    compare(Order, H1, H2),
-    diff3(Order, H1, T1, H2, T2, Diff).
-
-diff3(<,  H1, T1,  H2, T2, [H1|Diff]) :-
-    diff12(T1, H2, T2, Diff).
-diff3(=, _H1, T1, _H2, T2, Diff) :-
-    ord_subtract(T1, T2, Diff).
-diff3(>,  H1, T1, _H2, T2, Diff) :-
-    diff21(T2, H1, T1, Diff).
-
-%!  ord_union(+OSet1, +OSet2, -Union).
-
-ord_union([], Union, Union).
-ord_union([H1|T1], L2, Union) :-
-    union2(L2, H1, T1, Union).
-
-union2([], H1, T1, [H1|T1]).
-union2([H2|T2], H1, T1, Union) :-
-    compare(Order, H1, H2),
-    union3(Order, H1, T1, H2, T2, Union).
-
-union3(<, H1, T1,  H2, T2, [H1|Union]) :-
-    union2(T1, H2, T2, Union).
-union3(=, H1, T1, _H2, T2, [H1|Union]) :-
-    ord_union(T1, T2, Union).
-union3(>, H1, T1,  H2, T2, [H2|Union]) :-
-    union2(T2, H1, T1, Union).
+mon_invalidate_dependents(Head) :-
+    tdebug(monotonic, 'Invalidate dependents for ~p', [Head]),
+    forall(dyn_affected(Head, ATrie),
+           '$idg_mono_invalidate'(ATrie)).
 
 %!  abolish_monotonic_tables
 %
 %   Abolish all monotonic tables and the monotonic dependency relations.
+%
+%   @tbd: just prepare for incremental reevaluation?
 
 abolish_monotonic_tables :-
     (   '$tbl_variant_table'(VariantTrie),
@@ -1761,6 +1787,8 @@ abstract_goal(Head, Head).
 %
 %   @tbd Add a '$clause_head'(-Head, +ClauseRef) to only decompile the
 %   head.
+
+:- public dyn_update/2, dyn_update/3.
 
 dyn_update(_Action, ClauseRef) :-
     (   atomic(ClauseRef)                       % avoid retractall, start(_)
@@ -1837,35 +1865,53 @@ try_reeval(ATrie, Goal, Return) :-
     nb_current('$tbl_reeval', true),
     !,
     tdebug(reeval, 'Nested re-evaluation for ~p', [ATrie]),
-    '$tbl_reeval_prepare'(ATrie, _Variant, Clause),
-    (   nonvar(Clause)
-    ->  trie_gen_compiled(Clause, Return)
-    ;   call(Goal)
-    ).
+    do_reeval(ATrie, Goal, Return).
 try_reeval(ATrie, Goal, Return) :-
     tdebug(reeval, 'Planning reeval for ~p', [ATrie]),
     findall(Path, false_path(ATrie, Path), Paths0),
-    sort(0, @>, Paths0, Paths),
-    split_paths(Paths, Dynamic, Complete),
-    tdebug(forall('$member'(Path, Dynamic),
-                  tdebug(reeval, '  Re-eval dynamic path: ~p', [Path]))),
-    tdebug(forall('$member'(Path, Complete),
+    sort(0, @>, Paths0, Paths1),
+    clean_paths(Paths1, Paths),
+    tdebug(forall('$member'(Path, Paths),
                   tdebug(reeval, '  Re-eval complete path: ~p', [Path]))),
-    reeval_paths(Dynamic, ATrie),
-    reeval_paths(Complete, ATrie),
-    '$tbl_reeval_prepare'(ATrie, _Variant, Clause),
-    (   nonvar(Clause)
+    reeval_paths(Paths, ATrie),
+    do_reeval(ATrie, Goal, Return).
+
+do_reeval(ATrie, Goal, Return) :-
+    '$tbl_reeval_prepare_top'(ATrie, Clause),
+    (   Clause == 0                          % complete and answer subsumption
+    ->  '$tbl_table_status'(ATrie, _Status, M:Variant, Return),
+        M:'$table_mode'(Goal0, Variant, ModeArgs),
+        Goal = M:Goal0,
+        moded_gen_answer(ATrie, Return, ModeArgs)
+    ;   nonvar(Clause)                       % complete
     ->  trie_gen_compiled(Clause, Return)
-    ;   call(Goal)
+    ;   call(Goal)                           % actually re-evaluate
     ).
 
-split_paths([], [], []).
-split_paths([[Rank-_Len|Path]|T], [Path|DT], CT) :-
-    status_rank(dynamic, Rank),
+
+%!  clean_paths(+PathsIn, -Paths)
+%
+%   Clean the reevaluation paths. Get rid of   the head term for ranking
+%   and remove duplicate paths. Note that  a   Path  is a list of tries,
+%   ground terms.
+
+clean_paths([], []).
+clean_paths([[_|Path]|T0], [Path|T]) :-
+    clean_paths(T0, Path, T).
+
+clean_paths([], _, []).
+clean_paths([[_|CPath]|T0], CPath, T) :-
     !,
-    split_paths(T, DT, CT).
-split_paths([[_|Path]|T], DT, [Path|CT]) :-
-    split_paths(T, DT, CT).
+    clean_paths(T0, CPath, T).
+clean_paths([[_|Path]|T0], _, [Path|T]) :-
+    clean_paths(T0, Path, T).
+
+%!  reeval_paths(+Paths, +Atrie)
+%
+%   Make Atrie valid again by re-evaluating nodes   in Paths. We stop as
+%   soon as Atrie  is  valid  again.  Note   that  we  may  not  need to
+%   reevaluate all paths because evaluating the   head  of some path may
+%   include other nodes in an SCC, making them valid as well.
 
 reeval_paths([], _) :-
     !.
@@ -1873,30 +1919,32 @@ reeval_paths(BottomUp, ATrie) :-
     is_invalid(ATrie),
     !,
     reeval_heads(BottomUp, ATrie, BottomUp1),
-    reeval_paths(BottomUp1, ATrie).
+    tdebug(assertion(BottomUp \== BottomUp1)),
+    '$list_to_set'(BottomUp1, BottomUp2),
+    reeval_paths(BottomUp2, ATrie).
 reeval_paths(_, _).
 
-reeval_heads(_, ATrie, _) :-
+reeval_heads(_, ATrie, []) :-                % target is valid again
     \+ is_invalid(ATrie),
     !.
 reeval_heads([], _, []).
-reeval_heads([[H]|B], ATrie, BT) :-
-    !,
+reeval_heads([[H]|B], ATrie, BT) :-          % Last one of a falsepath
     reeval_node(H),
-    reeval_heads(B, ATrie, BT).
-reeval_heads([[]|B], ATrie, BT) :-
     !,
     reeval_heads(B, ATrie, BT).
 reeval_heads([[H|T]|B], ATrie, [T|BT]) :-
-    !,
     reeval_node(H),
+    !,
     reeval_heads(B, ATrie, BT).
+reeval_heads([FP|B], ATrie, [FP|BT]) :-
+    reeval_heads(B, ATrie, BT).
+
 
 %!  false_path(+Atrie, -Path) is nondet.
 %
 %   True when Path is a list of   invalid  tries (bottom up, ending with
-%   ATrie). The last element of the list is a term `Rank-Length` that is
-%   used for sorting the paths.
+%   ATrie).   The   last   element   of    the     list    is   a   term
+%   `s(Rank,Length,ATrie)` that is used for sorting the paths.
 %
 %   If we find a table along the  way   that  is being worked on by some
 %   other thread we wait for it.
@@ -1907,19 +1955,23 @@ false_path(ATrie, BottomUp) :-
 
 false_path(ATrie, [ATrie|T], Seen) :-
     \+ memberchk(ATrie, Seen),
-    '$idg_edge'(ATrie, dependent, Dep),
-    '$tbl_reeval_wait'(Dep, Status),
+    '$idg_false_edge'(ATrie, Dep, Status),
     tdebug(reeval, '    ~p has dependent ~p (~w)', [ATrie, Dep, Status]),
     (   Status == invalid
-    ->  false_path(Dep, T, [ATrie|Seen])
+    ->  (   false_path(Dep, T, [ATrie|Seen])
+        ->  true
+        ;   length(Seen, Len),               % invalid has no dependencies:
+            T = [s(2, Len, [])]              % dynamic and tabled or explicitly
+        )                                    % invalidated
     ;   status_rank(Status, Rank),
         length(Seen, Len),
-        T = [Rank-Len]
+        T = [s(Rank,Len,Dep)]
     ).
 
-status_rank(dynamic,  2) :- !.
-status_rank(complete, 1) :- !.
-status_rank(Status,   Rank) :-
+status_rank(dynamic,   2) :- !.
+status_rank(monotonic, 2) :- !.
+status_rank(complete,  1) :- !.
+status_rank(Status,    Rank) :-
     var(Rank),
     !,
     format(user_error, 'Re-eval from status ~p~n', [Status]),
@@ -1931,7 +1983,7 @@ is_invalid(ATrie) :-
     '$idg_falsecount'(ATrie, FalseCount),
     FalseCount > 0.
 
-%!  reeval_node(+ATrie)
+%!  reeval_node(+ATrie) is semidet.
 %
 %   Re-evaluate the invalid answer trie ATrie.  Initially this created a
 %   nested tabling environment, but this is dropped:
@@ -1941,21 +1993,78 @@ is_invalid(ATrie) :-
 %       outer SCC.  This doesn't work well with a sub-environment.
 %     - We do not need one.  If this environment is not merged into the
 %       outer one it will complete before we continue.
+%
+%   Fails if the node is not ready for   evaluation. This is the case if
+%   it is valid or it is a lazy table that has invalid dependencies.
 
 reeval_node(ATrie) :-
-    '$tbl_reeval_prepare'(ATrie, Variant, Clause),
-    var(Clause),
+    '$tbl_reeval_prepare'(ATrie, M:Variant),
     !,
-    tdebug(reeval, 'Re-evaluating ~p', [Variant]),
+    M:'$table_mode'(Goal0, Variant, _Moded),
+    Goal = M:Goal0,
+    tdebug(reeval, 'Re-evaluating ~p', [Goal]),
     (   '$idg_reset_current',
         setup_call_cleanup(
             nb_setval('$tbl_reeval', true),
-            ignore(Variant),                    % assumes local scheduling
+            ignore(Goal),                    % assumes local scheduling
             nb_delete('$tbl_reeval')),
         fail
-    ;   tdebug(reeval, 'Re-evaluated ~p', [Variant])
+    ;   tdebug(reeval, 'Re-evaluated ~p', [Goal])
     ).
-reeval_node(_).
+reeval_node(ATrie) :-
+    '$mono_reeval_prepare'(ATrie, Size),
+    !,
+    setup_call_cleanup(
+        '$tbl_propagate_start'(Old),
+        reeval_monotonic_node(ATrie, Size),
+        '$tbl_propagate_end'(Old)).
+reeval_node(ATrie) :-
+    \+ is_invalid(ATrie).
+
+reeval_monotonic_node(ATrie, Size) :-
+    tdebug(reeval, 'Re-evaluating lazy monotonic ~p', [ATrie]),
+    (   '$idg_mono_affects_lazy'(ATrie, _0SrcTrie, Dep, DepRef, Answers),
+        length(Answers, Count),
+        (   Dep = dependency(Head, Cont, Skel)
+        ->  (   '$member'(ClauseRef, Answers),
+                '$clause'(Head, _Body, ClauseRef, _Bindings),
+                tdebug(monotonic, 'Propagating ~p from ~p to ~p',
+                       [Head, _0SrcTrie, ATrie]),
+                '$idg_set_current'(_, ATrie),
+                pdelim(Cont, Skel, ATrie),
+                fail
+            ;   '$idg_mono_empty_queue'(DepRef, Count)
+            )
+        ;   Dep = dependency(SrcSkel, true, Cont, Skel)
+        ->  (   '$member'(Node, Answers),
+                '$tbl_node_answer'(Node, SrcSkel),
+                tdebug(monotonic, 'Propagating ~p from ~p to ~p',
+                       [Skel, _0SrcTrie, ATrie]),
+                '$idg_set_current'(_, ATrie),
+                pdelim(Cont, Skel, ATrie),
+                fail
+            ;   '$idg_mono_empty_queue'(DepRef, Count)
+            )
+        ;   tdebug(monotonic, 'Skipped queued ~p, answers ~p',
+                   [Dep, Answers])
+        ),
+        fail
+    ;   '$mono_reeval_done'(ATrie, Size, Deps),
+        (   Deps == []
+        ->  tdebug(reeval, 'Re-evaluation for ~p complete', [ATrie])
+        ;   Deps == false
+        ->  tdebug(reeval, 'Re-evaluation for ~p queued new answers', [ATrie]),
+            reeval_node(ATrie)
+        ;   tdebug(reeval, 'Re-evaluation for ~p: new invalid deps: ~p', [ATrie, Deps]),
+            reeval_nodes(Deps),
+            reeval_node(ATrie)
+        )
+    ).
+
+reeval_nodes([]).
+reeval_nodes([H|T]) :-
+    reeval_node(H),
+    reeval_nodes(T).
 
 
 		 /*******************************

@@ -37,6 +37,9 @@
 #ifndef PL_GLOBAL_H_INCLUDED
 #define PL_GLOBAL_H_INCLUDED
 #include "pl-allocpool.h"
+#include "pl-mutex.h"
+#include "pl-thread.h"
+#include "pl-gmp.h"
 
 #ifndef GLOBAL			/* global variables */
 #define GLOBAL extern
@@ -156,6 +159,8 @@ struct PL_global_data
     int		engines_finished;	/* # engines threads */
     double	thread_cputime;		/* Total CPU time of threads */
 #endif
+    int		errors;			/* Printed error messages */
+    int		warnings;		/* Printed warning messages */
   } statistics;
 
 #ifdef O_PROFILE
@@ -440,7 +445,6 @@ struct PL_local_data
 #endif
   int		in_arithmetic;		/* doing arithmetic */
   int		in_print_message;	/* Inside printMessage() */
-  gen_t		gen_reload;		/* reload generation */
   void *	glob_info;		/* pl-glob.c */
   IOENC		encoding;		/* default I/O encoding */
   struct PL_local_data *next_free;	/* see maybe_free_local_data() */
@@ -449,6 +453,9 @@ struct PL_local_data
   { int		pending[2];		/* PL_raise() pending signals */
     int		current;		/* currently processing signal */
     int		is_sync;		/* current signal is synchronous */
+#ifndef __unix__
+    int		forced;			/* Forced signal */
+#endif
   } signal;
 
   struct
@@ -518,6 +525,8 @@ struct PL_local_data
     double	last_walltime;		/* Last Wall time (m-secs since start) */
     double	user_cputime;		/* User saved CPU time */
     double	system_cputime;		/* Kernel saved CPU time */
+    int		errors;			/* Printed error messages */
+    int		warnings;		/* Printed warning messages */
   } statistics;
 
 #ifdef O_GMP
@@ -609,6 +618,7 @@ struct PL_local_data
     int	has_scheduling_component;	/* A leader was created */
     int in_answer_completion;		/* Running answer completion */
     int in_assert_propagation;		/* Running propagate_assert/1 */
+    int flags;				/* Global flags (TF_*) */
     term_t delay_list;			/* Global delay list */
     term_t idg_current;			/* Current node in IDG (trie symbol) */
     struct
@@ -677,8 +687,8 @@ struct PL_local_data
 
 #ifdef O_LIMIT_DEPTH
   struct
-  { uintptr_t limit;
-    uintptr_t reached;
+  { size_t limit;
+    size_t reached;
   } depth_info;
 #endif
 
@@ -693,6 +703,9 @@ struct PL_local_data
   pl_shift_status_t shift_status;	/* Stack shifter status */
   pl_debugstatus_t _debugstatus;	/* status of the debugger */
   struct btrace *btrace_store;		/* C-backtraces */
+#if O_DEBUG
+  pl_internaldebugstatus_t internal_debug; /* status of C-level debug flags */
+#endif
 
 #ifdef O_PLMT
   struct
@@ -710,14 +723,17 @@ struct PL_local_data
 #endif
 
   struct
-  { gen_t	gen_start;		/* Global start generation */
-    gen_t	gen_base;		/* Local  start generation */
-    gen_t	gen_max;		/* Transaction max gen */
-    gen_t	gen_nest;		/* Start of nested generation */
-    gen_t	generation;		/* Local current generation */
-    Table	clauses;		/* Affected clauses */
-    term_t	id;			/* Default the goal */
-    struct tr_stack *stack;		/* Nested transaction stack */
+  { gen_t	      gen_start;	/* Global start generation */
+    gen_t	      gen_base;		/* Local  start generation */
+    gen_t	      gen_max;		/* Transaction max gen */
+    gen_t	      gen_nest;		/* Start of nested generation */
+    gen_t	      generation;	/* Local current generation */
+    Table	      clauses;		/* Affected clauses */
+    Table	      predicates;	/* Pred --> last modified */
+    struct tbl_trail *table_trail;	/* Affected tables */
+    term_t	      id;		/* Default the goal */
+    struct tr_stack  *stack;		/* Nested transaction stack */
+    unsigned int      flags;		/*  */
   } transaction;
 
 #ifdef O_LOCALE
@@ -732,9 +748,20 @@ struct PL_local_data
   } clauses;
 
   struct
+  { gen_t	generation;		/* reload generation */
+    int		nesting;		/* reload nesting */
+  } reload;
+
+  struct
   { DefinitionChain nesting;		/* Nesting chain in the autoloader */
     Definition	loop;			/* We are looping on this def */
   } autoload;
+
+  struct
+  { term_t undo_list;			/* Stacked undo goals */
+    Buffer scheduled;
+    int    running;
+  } undo;
 
   struct
   { intptr_t _total_marked;		/* # marked global cells */
@@ -799,8 +826,6 @@ GLOBAL PL_local_data_t *PL_current_engine_ptr;
 #define exception_printed	(LD->exception.printed)
 #define gc_status		(LD->gc.status)
 #define debugstatus		(LD->_debugstatus)
-#define depth_limit		(LD->depth_info.limit)
-#define depth_reached		(LD->depth_info.reached)
 #define base_addresses		(LD->bases)
 #define Suser_input		(LD->IO.streams[0])
 #define Suser_output		(LD->IO.streams[1])

@@ -35,8 +35,26 @@
 */
 
 /*#define O_DEBUG 1*/			/* include crash/0 */
-#include "pl-incl.h"
+#include "pl-ext.h"
+#include "pl-prims.h"
+#include "pl-sys.h"
+#include "pl-pro.h"
+#include "pl-write.h"
+#include "pl-read.h"
+#include "pl-funct.h"
+#include "pl-proc.h"
+#include "pl-trace.h"
+#include "pl-dwim.h"
+#include "pl-modul.h"
+#include "pl-gc.h"
+#include "pl-flag.h"
+#include "pl-xterm.h"
+#include "pl-supervisor.h"
+#include "pl-fli.h"
+#include "pl-nt.h"
 #include "os/pl-ctype.h"
+#include "os/pl-fmt.h"
+#include "os/pl-prologflag.h"
 
 #if O_DEBUG
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -150,10 +168,6 @@ static const PL_extension foreigns[] = {
   FRG("set_prolog_hook",	3, pl_set_prolog_hook,	        0),
 #endif
   FRG("context_module",		1, pl_context_module,	     META),
-
-#if O_STRING
-  FRG("sub_string",		5, pl_sub_string,	     NDET),
-#endif /* O_STRING */
 
   FRG("format",			2, pl_format,		     META),
 #ifdef O_DEBUG
@@ -406,6 +420,8 @@ DECL_PLIST(cbtrace);
 DECL_PLIST(wrap);
 DECL_PLIST(event);
 DECL_PLIST(transaction);
+DECL_PLIST(undo);
+DECL_PLIST(error);
 
 void
 initBuildIns(void)
@@ -477,6 +493,8 @@ initBuildIns(void)
   REG_PLIST(wrap);
   REG_PLIST(event);
   REG_PLIST(transaction);
+  REG_PLIST(undo);
+  REG_PLIST(error);
 
 #define LOOKUPPROC(name) \
 	{ GD->procedures.name = lookupProcedure(FUNCTOR_ ## name, m); \
@@ -544,6 +562,7 @@ initBuildIns(void)
   PL_meta_predicate(PL_predicate("prolog_listen",    3, "system"), "+:+");
   PL_meta_predicate(PL_predicate("prolog_unlisten",  2, "system"), "+:");
   PL_meta_predicate(PL_predicate("with_tty_raw",     1, "system"), "0");
+  PL_meta_predicate(PL_predicate("$sig_atomic",      1, "system"), "0");
 
   for( ecell = ext_head; ecell; ecell = ecell->next )
     bindExtensions(ecell->module, ecell->extensions);

@@ -52,6 +52,8 @@ consistency.
 :- use_module(library(thread)).
 :- use_module(library(debug)).
 
+%:- debug(veto).
+%:- debug(veto(constraint)).
 :- debug(veto(verify)).
 
 :- meta_predicate
@@ -60,6 +62,16 @@ consistency.
 test_transaction_constraints :-
     test_transaction_constraints(1000, 2, 0, call),
     test_transaction_constraints(1000, 2, 0, snapshot).
+
+%!  test_transaction_constraints(+N, +M, +Delay, +Snapshot)
+%
+%   Update a single fact (temperature/1) N   times, concurrently using M
+%   threads.  An  additional  thread  checks  that  there  is  only  one
+%   temperature/1 fact visible at any point in  time. It can do this two
+%   ways: simple check (`call`) or doing   the check inside a _snapshot_
+%   (`snapshot`).
+%
+%   @arg Delay sets a random delay 0..Delay between each update
 
 test_transaction_constraints(N, M, Delay, Snapshot) :-
     retractall(temperature(_)),
@@ -80,8 +92,8 @@ test_transaction_constraints(N, M, Delay, Snapshot) :-
 test(N, M, Delay) :-
     set_flag(conflict, 0),
     concurrent_forall(
-        between(1, N, _),
-        set_random_temp(Delay),
+        between(1, N, I),
+        set_temp(I, Delay),
         [ threads(M)
         ]),
     get_flag(conflict, C),
@@ -123,15 +135,29 @@ no_duplicate_temp(Why) :-
     (   List = [_]
     ->  true
     ;   debug(veto(Why), '~w: ~p', [Why, List]),
+        (   Why == verify
+        ->  mutex_statistics
+        ;   true
+        ),
         flag(conflict, N, N+1),
         fail
     ).
 
-set_random_temp(Delay) :-
+set_temp(random, Delay) :-              % original test; not used now.
+    !,
     A is random_float*Delay,
     sleep(A),
     random_between(-40, 40, Temp),
     set_temp(Temp).
+set_temp(Temp, Delay) :-                % setting to concrete values make
+    A is random_float*Delay,            % failures easier to interpret.
+    sleep(A),
+    tid(Id),
+    set_temp(Id-Temp).
+
+tid(Id) :-
+    thread_self(Me),
+    thread_property(Me, id(Id)).
 
 concurrent_with(G1, G2) :-
     setup_call_cleanup(

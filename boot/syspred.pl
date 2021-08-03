@@ -3,9 +3,10 @@
     Author:        Jan Wielemaker
     E-mail:        J.Wielemaker@vu.nl
     WWW:           http://www.swi-prolog.org
-    Copyright (c)  1985-2020, University of Amsterdam
+    Copyright (c)  1985-2021, University of Amsterdam
                               VU University Amsterdam
                               CWI, Amsterdam
+                              SWI-Prolog Solutions b.v.
     All rights reserved.
 
     Redistribution and use in source and binary forms, with or without
@@ -80,14 +81,18 @@
             tmp_file_stream/3,                  % +Enc, -File, -Stream
             call_with_depth_limit/3,            % :Goal, +Limit, -Result
             call_with_inference_limit/3,        % :Goal, +Limit, -Result
+            rule/2,                             % :Head, -Rule
+            rule/3,                             % :Head, -Rule, ?Ref
             numbervars/3,                       % +Term, +Start, -End
             term_string/3,                      % ?Term, ?String, +Options
             nb_setval/2,                        % +Var, +Value
             thread_create/2,                    % :Goal, -Id
             thread_join/1,                      % +Id
             transaction/1,                      % :Goal
+            transaction/2,                      % :Goal, +Options
             transaction/3,                      % :Goal, :Constraint, +Mutex
             snapshot/1,                         % :Goal
+            undo/1,                             % :Goal
             set_prolog_gc_thread/1,		% +Status
 
             '$wrap_predicate'/5                 % :Head, +Name, -Closure, -Wrapped, +Body
@@ -99,7 +104,9 @@
     use_foreign_library(:, +),
     transaction(0),
     transaction(0,0,+),
-    snapshot(0).
+    snapshot(0),
+    rule(:, -),
+    rule(:, -, ?).
 
 
                 /********************************
@@ -473,12 +480,11 @@ canonical_source_file(Spec, File) :-
     !,
     File = Spec.
 canonical_source_file(Spec, File) :-
-    absolute_file_name(Spec,
-                           [ file_type(prolog),
-                             access(read),
-                             file_errors(fail)
-                           ],
-                           File),
+    absolute_file_name(Spec, File,
+                       [ file_type(prolog),
+                         access(read),
+                         file_errors(fail)
+                       ]),
     source_file(File).
 
 
@@ -661,15 +667,14 @@ call_with_depth_limit(G, Limit, Result) :-
 
 %!  call_with_inference_limit(:Goal, +InferenceLimit, -Result)
 %
-%   Equivalent to call(Goal), but poses  a   limit  on the number of
-%   inferences. If this limit is  reached,   Result  is unified with
-%   =inference_limit_exceeded=, otherwise Result  is   unified  with
-%   =|!|=  if  Goal  succeeded  without  a  choicepoint  and  =true=
-%   otherwise.
+%   Equivalent to call(Goal),  but  poses  a   limit  on  the  number of
+%   inferences. If this  limit  is  reached,   Result  is  unified  with
+%   `inference_limit_exceeded`, otherwise Result is unified  with `!` if
+%   Goal succeeded without a choicepoint and `true` otherwise.
 %
-%   Note that we perform calls in   system  to avoid auto-importing,
-%   which makes raiseInferenceLimitException()  fail   to  recognise
-%   that the exception happens in the overhead.
+%   Note that we perform calls in  system to avoid auto-importing, which
+%   makes raiseInferenceLimitException() fail  to   recognise  that  the
+%   exception happens in the overhead.
 
 :- meta_predicate
     call_with_inference_limit(0, +, -).
@@ -678,8 +683,11 @@ call_with_inference_limit(G, Limit, Result) :-
     '$inference_limit'(Limit, OLimit),
     (   catch(G, Except,
               system:'$inference_limit_except'(OLimit, Except, Result0)),
-        system:'$inference_limit_true'(Limit, OLimit, Result0),
-        ( Result0 == ! -> ! ; true ),
+        (   Result0 == inference_limit_exceeded
+        ->  !
+        ;   system:'$inference_limit_true'(Limit, OLimit, Result0),
+            ( Result0 == ! -> ! ; true )
+        ),
         Result = Result0
     ;   system:'$inference_limit_false'(OLimit)
     ).
@@ -865,6 +873,8 @@ define_or_generate(Pred) :-
     '$get_predicate_attribute'(Pred, (thread_local), 1).
 '$predicate_property'((multifile), Pred) :-
     '$get_predicate_attribute'(Pred, (multifile), 1).
+'$predicate_property'((discontiguous), Pred) :-
+    '$get_predicate_attribute'(Pred, (discontiguous), 1).
 '$predicate_property'(imported_from(Module), Pred) :-
     '$get_predicate_attribute'(Pred, imported, Module).
 '$predicate_property'(transparent, Pred) :-
@@ -891,8 +901,12 @@ define_or_generate(Pred) :-
     '$get_predicate_attribute'(Pred, indexed, Indices).
 '$predicate_property'(noprofile, Pred) :-
     '$get_predicate_attribute'(Pred, noprofile, 1).
+'$predicate_property'(ssu, Pred) :-
+    '$get_predicate_attribute'(Pred, ssu, 1).
 '$predicate_property'(iso, Pred) :-
     '$get_predicate_attribute'(Pred, iso, 1).
+'$predicate_property'(det, Pred) :-
+    '$get_predicate_attribute'(Pred, det, 1).
 '$predicate_property'(quasi_quotation_syntax, Pred) :-
     '$get_predicate_attribute'(Pred, quasi_quotation_syntax, 1).
 '$predicate_property'(defined, Pred) :-
@@ -904,6 +918,12 @@ define_or_generate(Pred) :-
     table_flag(Flag, Pred).
 '$predicate_property'(incremental, Pred) :-
     '$get_predicate_attribute'(Pred, incremental, 1).
+'$predicate_property'(monotonic, Pred) :-
+    '$get_predicate_attribute'(Pred, monotonic, 1).
+'$predicate_property'(opaque, Pred) :-
+    '$get_predicate_attribute'(Pred, opaque, 1).
+'$predicate_property'(lazy, Pred) :-
+    '$get_predicate_attribute'(Pred, lazy, 1).
 '$predicate_property'(abstract(N), Pred) :-
     '$get_predicate_attribute'(Pred, abstract, N).
 '$predicate_property'(size(Bytes), Pred) :-
@@ -1401,6 +1421,41 @@ stack_property(low).
 stack_property(factor).
 
 
+		 /*******************************
+		 *            CLAUSE		*
+		 *******************************/
+
+%!  rule(:Head, -Rule) is nondet.
+%!  rule(:Head, -Rule, Ref) is nondet.
+%
+%   Similar to clause/2,3. but deals with clauses   that do not use `:-`
+%   as _neck_.
+
+rule(Head, Rule) :-
+    '$rule'(Head, Rule0),
+    conditional_rule(Rule0, Rule1),
+    Rule = Rule1.
+rule(Head, Rule, Ref) :-
+    '$rule'(Head, Rule0, Ref),
+    conditional_rule(Rule0, Rule1),
+    Rule = Rule1.
+
+conditional_rule(?=>(Head, Body0), (Head,Cond=>Body)) :-
+    split_on_cut(Body0, Cond, Body),
+    !.
+conditional_rule(Rule, Rule).
+
+split_on_cut(Var, _, _) :-
+    var(Var),
+    !,
+    fail.
+split_on_cut((Cond,!,Body), Cond, Body) :-
+    !.
+split_on_cut((A,B), (A,Cond), Body) :-
+    split_on_cut(B, Cond, Body).
+
+
+
                  /*******************************
                  *             TERM             *
                  *******************************/
@@ -1523,16 +1578,60 @@ set_prolog_gc_thread(Status) :-
     '$domain_error'(gc_thread, Status).
 
 %!  transaction(:Goal).
+%!  transaction(:Goal, +Options).
+%!  transaction(:Goal, :Constraint, +Mutex).
 %!  snapshot(:Goal).
 %
 %   Wrappers to guarantee clean Module:Goal terms.
 
 transaction(Goal) :-
-    '$transaction'(Goal).
+    '$transaction'(Goal, []).
+transaction(Goal, Options) :-
+    '$transaction'(Goal, Options).
 transaction(Goal, Constraint, Mutex) :-
     '$transaction'(Goal, Constraint, Mutex).
 snapshot(Goal) :-
     '$snapshot'(Goal).
+
+
+		 /*******************************
+		 *            UNDO		*
+		 *******************************/
+
+:- meta_predicate
+    undo(0).
+
+%!  undo(:Goal)
+%
+%   Schedule Goal to be called when backtracking takes us back to
+%   before this call.
+
+undo(Goal) :-
+    '$undo'(Goal).
+
+:- public
+    '$run_undo'/1.
+
+'$run_undo'([One]) :-
+    !,
+    call(One).
+'$run_undo'(List) :-
+    run_undo(List, _, Error),
+    (   var(Error)
+    ->  true
+    ;   throw(Error)
+    ).
+
+run_undo([], E, E).
+run_undo([H|T], E0, E) :-
+    (   catch(H, E1, true)
+    ->  (   var(E1)
+        ->  true
+        ;   '$urgent_exception'(E0, E1, E2)
+        )
+    ;   true
+    ),
+    run_undo(T, E2, E).
 
 
 %!  '$wrap_predicate'(:Head, +Name, -Closure, -Wrapped, +Body) is det.

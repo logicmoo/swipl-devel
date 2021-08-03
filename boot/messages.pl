@@ -3,9 +3,10 @@
     Author:        Jan Wielemaker
     E-mail:        J.Wielemaker@vu.nl
     WWW:           http://www.swi-prolog.org
-    Copyright (c)  1997-2020, University of Amsterdam
+    Copyright (c)  1997-2021, University of Amsterdam
                               VU University Amsterdam
                               CWI, Amsterdam
+                              SWI-Prolog Solutions b.v.
     All rights reserved.
 
     Redistribution and use in source and binary forms, with or without
@@ -47,6 +48,14 @@
     prolog:deprecated//1,	    % Deprecated features
     prolog:message_location//1,     % (File) location of error messages
     prolog:message_line_element/2.  % Extend printing
+:- '$hide'((
+    prolog:message//1,
+    prolog:error_message//1,
+    prolog:message_context//1,
+    prolog:deprecated//1,
+    prolog:message_location//1,
+    prolog:message_line_element/2)).
+
 :- discontiguous
     prolog_message/3.
 
@@ -95,6 +104,9 @@ translate_message2(error(resource_error(stack), Context)) -->
 translate_message2(error(resource_error(tripwire(Wire, Context)), _)) -->
     !,
     tripwire_message(Wire, Context).
+translate_message2(error(existence_error(reset, Ball), SWI)) -->
+    swi_location(SWI),
+    tabling_existence_error(Ball, SWI).
 translate_message2(error(ISO, SWI)) -->
     swi_location(SWI),
     term_message(ISO),
@@ -153,6 +165,8 @@ iso_message(existence_error(procedure, Proc)) -->
     unknown_proc_msg(Proc).
 iso_message(existence_error(answer_variable, Var)) -->
     [ '$~w was not bound by a previous query'-[Var] ].
+iso_message(existence_error(matching_rule, Goal)) -->
+    [ 'No rule matches ~p'-[Goal] ].
 iso_message(existence_error(Type, Object)) -->
     [ '~w `~p'' does not exist'-[Type, Object] ].
 iso_message(existence_error(Type, Object, In)) --> % not ISO
@@ -214,6 +228,10 @@ unknown_proc_msg((^)/2) -->
     !,
     [nl, '  ^/2 can only appear as the 2nd argument of setof/3 and bagof/3'].
 unknown_proc_msg((:-)/2) -->
+    !,
+    [nl, '  Rules must be loaded from a file'],
+    faq('ToplevelMode').
+unknown_proc_msg((=>)/2) -->
     !,
     [nl, '  Rules must be loaded from a file'],
     faq('ToplevelMode').
@@ -325,6 +343,25 @@ domain(range(Low,High)) -->
 domain(Domain) -->
     ['`~w\''-[Domain] ].
 
+%!  tabling_existence_error(+Ball, +Context)//
+%
+%   Called on invalid shift/1  calls.  Track   those  that  result  from
+%   tabling errors.
+
+tabling_existence_error(Ball, Context) -->
+    { table_shift_ball(Ball) },
+    [ 'Tabling dependency error' ],
+    swi_extra(Context).
+
+table_shift_ball(dependency(_Head)).
+table_shift_ball(dependency(_Skeleton, _Trie, _Mono)).
+table_shift_ball(call_info(_Skeleton, _Status)).
+table_shift_ball(call_info(_GenSkeleton, _Skeleton, _Status)).
+
+%!  dwim_predicates(+PI, -Dwims)
+%
+%   Find related predicate indicators.
+
 dwim_predicates(Module:Name/_Arity, Dwims) :-
     !,
     findall(Dwim, dwim_predicate(Module:Name, Dwim), Dwims).
@@ -416,8 +453,32 @@ swi_message(initialization_error(failed, Goal, File:Line)) -->
 swi_message(initialization_error(Error, Goal, File:Line)) -->
     [ '~w:~w: ~p '-[File, Line, Goal] ],
     translate_message(Error).
+swi_message(determinism_error(PI, det, Found, property)) -->
+    (   { '$pi_head'(user:PI, Head),
+          predicate_property(Head, det)
+        }
+    ->  [ 'Deterministic procedure ~p'-[PI] ]
+    ;   [ 'Procedure ~p called from a deterministic procedure'-[PI] ]
+    ),
+    det_error(Found).
+swi_message(determinism_error(PI, det, fail, guard)) -->
+    [ 'Procedure ~p failed after $-guard'-[PI] ].
+swi_message(determinism_error(PI, det, fail, guard_in_caller)) -->
+    [ 'Procedure ~p failed after $-guard in caller'-[PI] ].
+swi_message(determinism_error(Goal, det, fail, goal)) -->
+    [ 'Goal ~p failed'-[Goal] ].
+swi_message(determinism_error(Goal, det, nondet, goal)) -->
+    [ 'Goal ~p succeeded with a choice point'-[Goal] ].
 swi_message(qlf_format_error(File, Message)) -->
     [ '~w: Invalid QLF file: ~w'-[File, Message] ].
+swi_message(goal_expansion_error(bound, Term)) -->
+    [ 'Goal expansion bound a variable to ~p'-[Term] ].
+
+det_error(nondet) -->
+    [ ' succeeded with a choicepoint'- [] ].
+det_error(fail) -->
+    [ ' failed'- [] ].
+
 
 cond_location(File:Line) -->
     { file_base_name(File, Base) },
@@ -1126,6 +1187,12 @@ prolog_message(close_on_abort(Stream)) -->
     [ 'Abort: closed stream ~p'-[Stream] ].
 prolog_message(cancel_halt(Reason)) -->
     [ 'Halt cancelled: ~p'-[Reason] ].
+prolog_message(on_error(halt(Status))) -->
+    { statistics(errors, Errors),
+      statistics(warnings, Warnings)
+    },
+    [ 'Halting with status ~w due to ~D errors and ~D warnings'-
+      [Status, Errors, Warnings] ].
 
 prolog_message(query(QueryResult)) -->
     query_result(QueryResult).
@@ -1390,12 +1457,12 @@ prolog_message(nospy(Head)) -->
     { goal_to_predicate_indicator(Head, Pred)
     },
     [ 'Spy point removed from ~p'-[Pred] ].
-prolog_message(trace_mode(Bool)) -->
-    [ 'Trace mode switched to ~w'-[Bool] ].
-prolog_message(debug_mode(Bool)) -->
-    [ 'Debug mode switched to ~w'-[Bool] ].
-prolog_message(debugging(Bool)) -->
-    [ 'Debug mode is ~w'-[Bool] ].
+prolog_message(trace_mode(OnOff)) -->
+    [ 'Trace mode switched to ~w'-[OnOff] ].
+prolog_message(debug_mode(OnOff)) -->
+    [ 'Debug mode switched to ~w'-[OnOff] ].
+prolog_message(debugging(OnOff)) -->
+    [ 'Debug mode is ~w'-[OnOff] ].
 prolog_message(spying([])) -->
     !,
     [ 'No spy points' ].
@@ -1445,6 +1512,7 @@ prolog_message(frame(Frame, choice, PC)) -->
 prolog_message(frame(_, cut_call, _)) --> !, [].
 prolog_message(frame(Goal, trace(Port))) -->
     !,
+    thread_context,
     [ ' T ' ],
     port(Port),
     goal(Goal).
@@ -1603,7 +1671,7 @@ tripwire_message(Wire, Context) -->
     tripwire_context(Wire, Context).
 
 tripwire_context(_, ATrie) -->
-    { '$is_answer_trie'(ATrie),
+    { '$is_answer_trie'(ATrie, _),
       !,
       '$tabling':atrie_goal(ATrie, QGoal),
       user_predicate_indicator(QGoal, Goal)
@@ -1655,6 +1723,7 @@ default_theme(message(Level),         Attrs) :-
     prolog:message_prefix_hook/2.
 :- thread_local
     user:thread_message_hook/3.
+:- '$hide'((push_msg/1,pop_msg/0)).
 
 %!  print_message(+Kind, +Term)
 %
@@ -1687,7 +1756,8 @@ pop_msg :-
     (   nb_current('$inprint_message', [_|Messages]),
         Messages \== []
     ->  b_setval('$inprint_message', Messages)
-    ;   nb_delete('$inprint_message')
+    ;   nb_delete('$inprint_message'),              % delete history
+        b_setval('$inprint_message', [])
     ).
 
 print_message_guarded(Level, Term) :-
@@ -1699,11 +1769,24 @@ print_message_guarded(Level, Term) :-
                 ;   notrace(user:message_hook(Term, Level, Lines))
                 )
             ->  true
-            ;   print_system_message(Term, Level, Lines)
+            ;   '$inc_message_count'(Level),
+                print_system_message(Term, Level, Lines),
+                maybe_halt_on_error(Level)
             )
         )
     ;   true
     ).
+
+maybe_halt_on_error(error) :-
+    current_prolog_flag(on_error, halt),
+    !,
+    halt(1).
+maybe_halt_on_error(warning) :-
+    current_prolog_flag(on_warning, halt),
+    !,
+    halt(1).
+maybe_halt_on_error(_).
+
 
 %!  print_system_message(+Term, +Kind, +Lines)
 %
@@ -1752,7 +1835,7 @@ print_system_message(_, Kind, Lines) :-
     user:message_property/2.
 
 msg_property(Kind, Property) :-
-    user:message_property(Kind, Property),
+    notrace(user:message_property(Kind, Property)),
     !.
 msg_property(Kind, prefix(Prefix)) :-
     msg_prefix(Kind, Prefix),

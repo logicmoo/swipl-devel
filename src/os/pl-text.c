@@ -37,7 +37,8 @@
 #include "pl-arith.h"
 #include "pl-ctype.h"
 #include "pl-utf8.h"
-#include "pl-codelist.h"
+#include "../pl-codelist.h"
+#include "../pl-write.h"
 #include <errno.h>
 #include <stdio.h>
 #if HAVE_LIMITS_H
@@ -177,7 +178,7 @@ i64toa(int64_t val, char *out)
 
 
 int
-PL_get_text__LD(term_t l, PL_chars_t *text, int flags ARG_LD)
+PL_get_text(DECL_LD term_t l, PL_chars_t *text, int flags)
 { word w = valHandle(l);
 
   if ( (flags & CVT_ATOM) && isAtom(w) )
@@ -186,7 +187,7 @@ PL_get_text__LD(term_t l, PL_chars_t *text, int flags ARG_LD)
     if ( !get_atom_text(w, text) )
       goto maybe_write;
   } else if ( (flags & CVT_STRING) && isString(w) )
-  { if ( !get_string_text(w, text PASS_LD) )
+  { if ( !get_string_text(w, text) )
       goto maybe_write;
     if ( !PL_from_stack_text(text, flags) )
       return FALSE;			/* no memory */
@@ -266,7 +267,7 @@ PL_get_text__LD(term_t l, PL_chars_t *text, int flags ARG_LD)
       addBuffer(b, EOS, pl_wchar_t);
       text->text.w = baseBuffer(b, pl_wchar_t);
       text->encoding = ENC_WCHAR;
-    } else if ( (flags & (CVT_WRITE|CVT_WRITE_CANONICAL)) )
+    } else if ( (flags & (CVT_WRITE|CVT_WRITE_CANONICAL|CVT_WRITEQ)) )
     { goto case_write;
     } else
     { if ( (flags & CVT_VARNOFAIL) && result.status == CVT_partial )
@@ -308,18 +309,23 @@ PL_get_text__LD(term_t l, PL_chars_t *text, int flags ARG_LD)
     text->encoding = ENC_ISO_LATIN_1;
     text->storage  = PL_CHARS_LOCAL;
     text->canonical = TRUE;
-  } else if ( (flags & (CVT_WRITE|CVT_WRITE_CANONICAL)) )
+  } else if ( (flags & (CVT_WRITE|CVT_WRITE_CANONICAL|CVT_WRITEQ)) )
   { IOENC encodings[3];
     IOENC *enc;
     char *r;
     int wflags;
 
   case_write:
-    encodings[0] = ENC_ISO_LATIN_1;
-    encodings[1] = ENC_WCHAR;
-    encodings[2] = ENC_UNKNOWN;
+    if ( (flags&REP_UTF8) )
+    { encodings[0] = ENC_UTF8;
+      encodings[1] = ENC_UNKNOWN;
+    } else
+    { encodings[0] = ENC_ISO_LATIN_1;
+      encodings[1] = ENC_WCHAR;
+      encodings[2] = ENC_UNKNOWN;
+    }
 
-    if ( (flags&CVT_WRITEQ) == CVT_WRITEQ )
+    if ( (flags&CVT_WRITEQ) )
       wflags = PL_WRT_QUOTED|PL_WRT_NUMBERVARS;
     else if ( (flags&CVT_WRITE_CANONICAL) )
       wflags = PL_WRT_QUOTED|PL_WRT_IGNOREOPS|PL_WRT_NUMBERVARS;
@@ -341,12 +347,12 @@ PL_get_text__LD(term_t l, PL_chars_t *text, int flags ARG_LD)
 	text->storage = (r == text->buf ? PL_CHARS_LOCAL : PL_CHARS_MALLOC);
 	text->canonical = TRUE;
 
-	if ( *enc == ENC_ISO_LATIN_1 )
-	{ text->length = size-1;
-	  text->text.t = r;
-	} else
+	if ( *enc == ENC_WCHAR )
 	{ text->length = (size/sizeof(pl_wchar_t))-1;
 	  text->text.w = (pl_wchar_t *)r;
+	} else
+	{ text->length = size-1;
+	  text->text.t = r;
 	}
 
 	Sclose(fd);
@@ -354,6 +360,9 @@ PL_get_text__LD(term_t l, PL_chars_t *text, int flags ARG_LD)
 	goto out;
       } else
       { Sclose(fd);
+	if ( *enc == ENC_ISO_LATIN_1 && enc[1] != ENC_UNKNOWN )
+	  PL_clear_exception();
+
 	if ( r != text->buf )
 	  Sfree(r);
       }
@@ -368,7 +377,7 @@ out:
   return TRUE;
 
 maybe_write:
-  if ( (flags & (CVT_WRITE|CVT_WRITE_CANONICAL)) )
+  if ( (flags & (CVT_WRITE|CVT_WRITE_CANONICAL|CVT_WRITEQ)) )
     goto case_write;
 
 error:
@@ -451,8 +460,9 @@ globalSpaceRequirement(PL_chars_t *text)
 
 
 
+#define unify_text(term, tail, text, type) LDFUNC(unify_text, term, tail, text, type)
 static int
-unify_text(term_t term, term_t tail, PL_chars_t *text, int type ARG_LD)
+unify_text(DECL_LD term_t term, term_t tail, PL_chars_t *text, int type)
 { switch(type)
   { case PL_ATOM:
     { atom_t a = textToAtom(text);
@@ -540,14 +550,14 @@ unify_text(term_t term, term_t tail, PL_chars_t *text, int type ARG_LD)
               while (s < e) {
                 int chr;
 
-                s = utf8_get_char(s, &chr);
+		PL_utf8_code_point(&s, e, &chr);
                 p = EXTEND_SEQ_CODES(p, chr);
               }
             } else {
               while (s < e) {
                 int chr;
 
-                s = utf8_get_char(s, &chr);
+		PL_utf8_code_point(&s, e, &chr);
                 p = EXTEND_SEQ_CHARS(p, chr);
               }
             }
@@ -615,7 +625,7 @@ PL_unify_text(term_t term, term_t tail, PL_chars_t *text, int type)
   int rc;
 
   PL_STRINGS_MARK();
-  rc = unify_text(term, tail, text, type PASS_LD);
+  rc = unify_text(term, tail, text, type);
   PL_STRINGS_RELEASE();
   return rc;
 }
@@ -1065,7 +1075,7 @@ PL_canonicalise_text(PL_chars_t *text)
 	  size_t len = s - text->text.t;
 
 	  while(s<e)
-	  { s = utf8_get_char(s, &chr);
+	  { PL_utf8_code_point(&s, e, &chr);
 	    if ( chr > 0xff )		/* requires wide characters */
 	      wide = TRUE;
 	    len++;
@@ -1078,7 +1088,7 @@ PL_canonicalise_text(PL_chars_t *text)
 	  { pl_wchar_t *t, *to = PL_malloc(sizeof(pl_wchar_t)*(len+1));
 
 	    for(t=to; s<e; )
-	    { s = utf8_get_char(s, &chr);
+	    { PL_utf8_code_point(&s, e, &chr);
 	      *t++ = chr;
 	    }
 	    *t = EOS;
@@ -1092,7 +1102,7 @@ PL_canonicalise_text(PL_chars_t *text)
 	  { char *t, *to = PL_malloc(len+1);
 
 	    for(t=to; s<e;)
-	    { s = utf8_get_char(s, &chr);
+	    { PL_utf8_code_point(&s, e, &chr);
 	      *t++ = chr;
 	    }
 	    *t = EOS;

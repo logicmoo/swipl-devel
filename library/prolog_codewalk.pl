@@ -230,7 +230,8 @@ prolog_walk_code(Iteration, Options) :-
     (   walk_option_clauses(OTerm, Clauses),
         nonvar(Clauses)
     ->  walk_clauses(Clauses, OTerm)
-    ;   forall(( walk_option_module(OTerm, M),
+    ;   forall(( walk_option_module(OTerm, M0),
+                 copy_term(M0, M),
                  current_module(M),
                  scan_module(M, OTerm)
                ),
@@ -303,7 +304,8 @@ walk_from_initialization(OTerm) :-
              walk_from_initialization(Goal, OTerm))).
 
 init_goal_in_scope(Goal, SourceLocation, OTerm) :-
-    '$init_goal'(File, Goal, SourceLocation),
+    '$init_goal'(_When, Goal, SourceLocation),
+    SourceLocation = File:_Line,
     (   walk_option_module(OTerm, M),
         nonvar(M)
     ->  module_property(M, file(File))
@@ -571,7 +573,7 @@ walk_called(Closure, _, _, _) :-
     '$get_predicate_attribute'(Module:Head, defined, 1).
 walk_called(ClosureCall, _, _, _) :-
     compound(ClosureCall),
-    functor(ClosureCall, Closure, _),
+    compound_name_arity(ClosureCall, Closure, _),
     blob(Closure, closure),
     !,
     '$closure_predicate'(Closure, Module:Name/Arity),
@@ -1046,6 +1048,7 @@ predicate_in_module(Module, PI) :-
 
 
 hidden_predicate(Name, _) :-
+    atom(Name),                         % []/N is not hidden
     sub_atom(Name, 0, _, _, '$wrap$').
 
 

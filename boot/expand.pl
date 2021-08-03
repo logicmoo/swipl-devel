@@ -218,24 +218,52 @@ expand_bodies(Terms, Pos0, Out, Pos) :-
     expand_terms(expand_body(MList), Terms, Pos0, Out, Pos),
     remove_attributes(Out, '$var_info').
 
-expand_body(MList, (Head0 :- Body), Pos0, (Head :- ExpandedBody), Pos) :-
+expand_body(MList, Clause0, Pos0, Clause, Pos) :-
+    clause_head_body(Clause0, Left0, Neck, Body0),
     !,
-    term_variables(Head0, HVars),
-    mark_vars_non_fresh(HVars),
-    f2_pos(Pos0, HPos, BPos0, Pos, HPos, BPos),
-    expand_goal(Body, BPos0, ExpandedBody0, BPos, MList, (Head0 :- Body)),
-    (   compound(Head0),
-        '$current_source_module'(M),
-        replace_functions(Head0, Eval, Head, M),
-        Eval \== true
-    ->  ExpandedBody = (Eval,ExpandedBody0)
-    ;   Head = Head0,
-        ExpandedBody = ExpandedBody0
-    ).
+    clause_head_body(Clause, Left, Neck, Body),
+    f2_pos(Pos0, LPos0, BPos0, Pos, LPos, BPos),
+    (   head_guard(Left0, Neck, Head0, Guard0)
+    ->  f2_pos(LPos0, HPos, GPos0, LPos, HPos, GPos),
+        mark_head_variables(Head0),
+        expand_goal(Guard0, GPos0, Guard, GPos, MList, Clause0),
+        Left = (Head,Guard)
+    ;   LPos = LPos0,
+        Head0 = Left0,
+        Left = Head,
+        mark_head_variables(Head0)
+    ),
+    expand_goal(Body0, BPos0, Body1, BPos, MList, Clause0),
+    expand_head_functions(Head0, Head, Body1, Body).
 expand_body(MList, (:- Body), Pos0, (:- ExpandedBody), Pos) :-
     !,
     f1_pos(Pos0, BPos0, Pos, BPos),
     expand_goal(Body, BPos0, ExpandedBody, BPos, MList, (:- Body)).
+
+clause_head_body((Head :- Body), Head, :-, Body).
+clause_head_body((Head => Body), Head, =>, Body).
+clause_head_body(?=>(Head, Body), Head, ?=>, Body).
+
+head_guard(Left, Neck, Head, Guard) :-
+    nonvar(Left),
+    Left = (Head,Guard),
+    (   Neck == (=>)
+    ->  true
+    ;   Neck == (?=>)
+    ).
+
+mark_head_variables(Head) :-
+    term_variables(Head, HVars),
+    mark_vars_non_fresh(HVars).
+
+expand_head_functions(Head0, Head, Body0, Body) :-
+    compound(Head0),
+    '$current_source_module'(M),
+    replace_functions(Head0, Eval, Head, M),
+    Eval \== true,
+    !,
+    Body = (Eval,Body0).
+expand_head_functions(Head, Head, Body, Body).
 
 expand_body(_MList, Head0, Pos, Clause, Pos) :- % TBD: Position handling
     compound(Head0),
@@ -251,7 +279,7 @@ expand_body(_, Head, Pos, Head, Pos).
 %
 %   Loop over two constructs that  can   be  added by term-expansion
 %   rules in order to run the   next phase: calling term_expansion/2
-%   can  return  a  list  and  terms    may   be  preceeded  with  a
+%   can  return  a  list  and  terms    may   be  preceded  with   a
 %   source-location.
 
 expand_terms(_, X, P, X, P) :-
@@ -406,14 +434,19 @@ diff3(>,  H1, T1, _H2, T2, Diff) :-
 %   branches claim the variable to  be   fresh,  we  can consider it
 %   fresh.
 
-merge_variable_info([]).
-merge_variable_info([Var=State|States]) :-
+merge_variable_info(State) :-
+    catch(merge_variable_info_(State),
+          error(uninstantiation_error(Term),_),
+          throw(error(goal_expansion_error(bound, Term), _))).
+
+merge_variable_info_([]).
+merge_variable_info_([Var=State|States]) :-
     (   get_attr(Var, '$var_info', CurrentState)
     ->  true
     ;   CurrentState = (-)
     ),
     merge_states(Var, State, CurrentState),
-    merge_variable_info(States).
+    merge_variable_info_(States).
 
 merge_states(_Var, State, State) :- !.
 merge_states(_Var, -, _) :- !.
@@ -445,13 +478,18 @@ save_variable_info([Var|Vars], [Var=State|States]):-
     ),
     save_variable_info(Vars, States).
 
-restore_variable_info([]).
-restore_variable_info([Var=State|States]) :-
+restore_variable_info(State) :-
+    catch(restore_variable_info_(State),
+          error(uninstantiation_error(Term),_),
+          throw(error(goal_expansion_error(bound, Term), _))).
+
+restore_variable_info_([]).
+restore_variable_info_([Var=State|States]) :-
     (   State == (-)
     ->  del_attr(Var, '$var_info')
     ;   put_attr(Var, '$var_info', State)
     ),
-    restore_variable_info(States).
+    restore_variable_info_(States).
 
 %!  var_property(+Var, ?Property)
 %
@@ -657,6 +695,10 @@ expand_control((\+A), P0, Goal, P, M, MList, Term, Done) :-
     restore_variable_info(SavedState),
     simplify(\+(EA), P1, Goal, P).
 expand_control(call(A), P0, call(EA), P, M, MList, Term, Done) :-
+    !,
+    f1_pos(P0, PA0, P, PA),
+    expand_goal(A, PA0, EA, PA, M, MList, Term, Done).
+expand_control($(A), P0, $(EA), P, M, MList, Term, Done) :-
     !,
     f1_pos(P0, PA0, P, PA),
     expand_goal(A, PA0, EA, PA, M, MList, Term, Done).
@@ -1151,6 +1193,9 @@ conj(X, PX, Y, PY, (X,Y), P) :-
 %   True if function expansion needs to be applied for the given
 %   term.
 
+:- multifile
+    function/2.
+
 function(.(_,_), _) :- \+ functor([_|_], ., _).
 
 
@@ -1414,6 +1459,7 @@ control((_;_)).
 control((_->_)).
 control((_*->_)).
 control(\+(_)).
+control($(_)).
 
 is_aux_meta(Term) :-
     callable(Term),
@@ -1421,10 +1467,12 @@ is_aux_meta(Term) :-
     sub_atom(Name, 0, _, _, '__aux_meta_call_').
 
 compile_meta(CallIn, CallOut, M, Term, (CallOut :- Body)) :-
-    term_variables(Term, AllVars),
+    replace_subterm(CallIn, true, Term, Term2),
+    term_variables(Term2, AllVars),
     term_variables(CallIn, InVars),
     intersection_eq(InVars, AllVars, HeadVars),
-    variant_sha1(CallIn+HeadVars, Hash),
+    copy_term_nat(CallIn+HeadVars, NAT),
+    variant_sha1(NAT, Hash),
     atom_concat('__aux_meta_call_', Hash, AuxName),
     expand_goal(CallIn, _Pos0, Body, _Pos, M, [], (CallOut:-CallIn), []),
     length(HeadVars, Arity),
@@ -1433,6 +1481,34 @@ compile_meta(CallIn, CallOut, M, Term, (CallOut :- Body)) :-
     ;   HeadArgs = HeadVars
     ),
     CallOut =.. [AuxName|HeadArgs].
+
+%!  replace_subterm(From, To, TermIn, TermOut)
+%
+%   Replace instances (==/2) of From inside TermIn by To.
+
+replace_subterm(From, To, TermIn, TermOut) :-
+    From == TermIn,
+    !,
+    TermOut = To.
+replace_subterm(From, To, TermIn, TermOut) :-
+    compound(TermIn),
+    compound_name_arity(TermIn, Name, Arity),
+    Arity > 0,
+    !,
+    compound_name_arity(TermOut, Name, Arity),
+    replace_subterm_compound(1, Arity, From, To, TermIn, TermOut).
+replace_subterm(_, _, Term, Term).
+
+replace_subterm_compound(I, Arity, From, To, TermIn, TermOut) :-
+    I =< Arity,
+    !,
+    arg(I, TermIn, A1),
+    arg(I, TermOut, A2),
+    replace_subterm(From, To, A1, A2),
+    I2 is I+1,
+    replace_subterm_compound(I2, Arity, From, To, TermIn, TermOut).
+replace_subterm_compound(_I, _Arity, _From, _To, _TermIn, _TermOut).
+
 
 %!  intersection_eq(+Small, +Big, -Shared) is det.
 %

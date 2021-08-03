@@ -36,14 +36,31 @@
 
 /*#define O_DEBUG 1*/
 
-#define GLOBAL SO_LOCAL			/* allocate global variables here */
-#include "pl-incl.h"
+#define GLOBAL			/* allocate global variables here */
+#include "pl-setup.h"
 #include "pl-comp.h"
 #include "pl-arith.h"
 #include "os/pl-cstack.h"
+#include "os/pl-ctype.h"
+#include "os/pl-prologflag.h"
 #include "pl-dbref.h"
 #include "pl-trie.h"
 #include "pl-tabling.h"
+#include "pl-undo.h"
+#include "pl-fli.h"
+#include "pl-funct.h"
+#include "pl-modul.h"
+#include "pl-rec.h"
+#include "pl-flag.h"
+#include "pl-ext.h"
+#include "pl-op.h"
+#include "pl-trace.h"
+#include "pl-read.h"
+#include "pl-wam.h"
+#include "pl-gc.h"
+#include "pl-proc.h"
+#include "pl-pro.h"
+#include "pl-gvar.h"
 #include <sys/stat.h>
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
@@ -75,7 +92,7 @@ setupProlog(void)
   DEBUG(1, Sdprintf("Starting Heap Initialisation\n"));
 
 #ifdef O_LOGICAL_UPDATE
-  next_generation(NULL PASS_LD);
+  next_generation(NULL);
 #endif
 
   LD->critical = 0;
@@ -100,7 +117,7 @@ setupProlog(void)
   GD->combined_stack.gc		 = TRUE;
   GD->combined_stack.overflow_id = STACK_OVERFLOW;
 
-  initPrologLocalData(PASS_LD1);
+  initPrologLocalData();
 
   DEBUG(1, Sdprintf("Atoms ...\n"));
   initAtoms();
@@ -125,8 +142,8 @@ setupProlog(void)
   initFlags();
   DEBUG(1, Sdprintf("Foreign Predicates ...\n"));
   initBuildIns();
-  DEBUG(1, Sdprintf("TCMalloc binding ...\n"));
-  initTCMalloc();
+  DEBUG(1, Sdprintf("Malloc binding ...\n"));
+  initMalloc();
   DEBUG(1, Sdprintf("Operators ...\n"));
   initOperators();
   DEBUG(1, Sdprintf("GMP ...\n"));
@@ -157,10 +174,10 @@ setupProlog(void)
 
 
 void
-initPrologLocalData(ARG1_LD)
+initPrologLocalData(DECL_LD)
 {
 #ifdef O_LIMIT_DEPTH
-  depth_limit   = DEPTH_NO_LIMIT;
+  LD->depth_info.limit = DEPTH_NO_LIMIT;
 #endif
 #ifdef O_INFERENCE_LIMIT
   LD->inference_limit.limit = INFERENCE_NO_LIMIT;
@@ -483,7 +500,8 @@ dispatch_signal(int sig, int sync)
   }
 
   if ( (LD->critical || (true(sh, PLSIG_SYNC) && !sync)) &&
-       !is_fatal_signal(sig) )
+       !is_fatal_signal(sig) &&
+       sig != SIGINT )
   { PL_raise(sig);			/* wait for better times! */
     return;
   }
@@ -496,7 +514,7 @@ dispatch_signal(int sig, int sync)
   }
 
   if ( !sync )
-    blockGC(0 PASS_LD);
+    blockGC(0);
   LD->signal.current = sig;
   LD->signal.is_sync = sync;
 
@@ -508,8 +526,8 @@ dispatch_signal(int sig, int sync)
   { term_t sigterm = PL_new_term_ref();
     qid_t qid;
 #ifdef O_LIMIT_DEPTH
-    uintptr_t olimit = depth_limit;
-    depth_limit = DEPTH_NO_LIMIT;
+    size_t olimit = LD->depth_info.limit;
+    LD->depth_info.limit = DEPTH_NO_LIMIT;
 #endif
 
     PL_put_atom_chars(sigterm, signal_name(sig));
@@ -520,7 +538,7 @@ dispatch_signal(int sig, int sync)
     if ( PL_next_solution(qid) ) {};		/* cannot ignore return */
     PL_cut_query(qid);
 #ifdef O_LIMIT_DEPTH
-    depth_limit = olimit;
+    LD->depth_info.limit = olimit;
 #endif
   } else if ( true(sh, PLSIG_THROW) )
   { char *predname;
@@ -538,12 +556,12 @@ dispatch_signal(int sig, int sync)
   } else if ( sh->handler )
   { int ex_pending = (exception_term && !sync);
 #ifdef O_LIMIT_DEPTH
-    uintptr_t olimit = depth_limit;
-    depth_limit = DEPTH_NO_LIMIT;
+    uintptr_t olimit = LD->depth_info.limit;
+    LD->depth_info.limit = DEPTH_NO_LIMIT;
 #endif
     (*sh->handler)(sig);
 #ifdef O_LIMIT_DEPTH
-    depth_limit = olimit;
+    LD->depth_info.limit = olimit;
 #endif
 
     DEBUG(MSG_SIGNAL,
@@ -564,7 +582,7 @@ dispatch_signal(int sig, int sync)
   lTop = (LocalFrame)valTermRef(lTopSave);
 
   if ( !sync )
-    unblockGC(0 PASS_LD);
+    unblockGC(0);
 
 					/* we cannot return.  First try */
 					/* longjmp.  If that fails, crash */
@@ -696,17 +714,22 @@ terminate_handler(int sig)
 #endif
 }
 
+void
+terminate_on_signal(int signo)
+{ PL_signal(signo, terminate_handler);
+}
+
 static void
 initTerminationSignals(void)
 {
 #ifdef SIGTERM
-  PL_signal(SIGTERM, terminate_handler);
+  terminate_on_signal(SIGTERM);
 #endif
 #ifdef SIGABRT
-  PL_signal(SIGABRT, terminate_handler);
+  terminate_on_signal(SIGABRT);
 #endif
 #ifdef SIGQUIT
-  PL_signal(SIGQUIT, terminate_handler);
+  terminate_on_signal(SIGQUIT);
 #endif
 }
 #endif /*HAVE_SIGNAL*/
@@ -1062,21 +1085,51 @@ int
 PL_handle_signals(void)
 { GET_LD
 
-  if ( !HAS_LD || LD->critical || !is_signalled(PASS_LD1) )
+  if ( !is_signalled() )
     return 0;
-  if ( exception_term )
-    return -1;
-
-  return handleSignals(PASS_LD1);
+  else
+    return handleSignals();
 }
 
+#ifndef __unix__
+#define handleSigInt(_) LDFUNC(handleSigInt, _)
+static int
+handleSigInt(DECL_LD)
+{ int intmask = 1<<(SIGINT-1);
+
+  if ( LD->signal.forced == SIGINT && LD->signal.pending[0] & intmask )
+  { ATOMIC_AND(&LD->signal.pending[0], ~intmask);
+
+    LD->signal.forced = 0;
+    dispatch_signal(SIGINT, TRUE);
+
+    if ( exception_term )
+      return -1;
+    updateAlerted(LD);
+
+    return 1;
+  }
+
+  return 0;
+}
+#endif
 
 int
-handleSignals(ARG1_LD)
+handleSignals(DECL_LD)
 { int done = 0;
   int i;
 
-  if ( !HAS_LD || LD->critical )
+  if ( !is_signalled() )
+    return 0;
+  if ( !HAS_LD )
+    return 0;
+  if ( exception_term )
+    return -1;
+#ifndef __unix__				/* on Unix we ask to signal twice */
+  if ( (done=handleSigInt()) )
+    return done;
+#endif
+  if ( LD->critical )
     return 0;
 
   for(i=0; i<2; i++)
@@ -1145,7 +1198,7 @@ PRED_IMPL("prolog_alert_signal", 2, prolog_alert_signal, 0)
 
 
 int
-endCritical__LD(ARG1_LD)
+f_endCritical(DECL_LD)
 { if ( exception_term )
     return FALSE;
 
@@ -1293,9 +1346,9 @@ PRED_IMPL("$on_signal", 4, on_signal, 0)
       succeed;
     }
 
-    return PL_error(NULL, 0, NULL, ERR_DOMAIN, ATOM_signal_handler, sig);
+    return PL_error(NULL, 0, NULL, ERR_DOMAIN, ATOM_signal_handler, new);
   } else
-    return PL_error(NULL, 0, NULL, ERR_TYPE, ATOM_signal_handler, sig);
+    return PL_error(NULL, 0, NULL, ERR_TYPE, ATOM_signal_handler, new);
 
   succeed;
 }
@@ -1388,6 +1441,7 @@ emptyStacks(void)
     LD->attvar.gc_attvars   = PL_new_term_ref();
     DEBUG(3, Sdprintf("attvar.tail at %p\n", valTermRef(LD->attvar.tail)));
 #endif
+    LD->undo.undo_list      = init_undo_list(); /* must be first.  See __do_undo() */
     LD->tabling.delay_list  = init_delay_list();
     LD->tabling.idg_current = PL_new_term_ref();
 #ifdef O_GVAR
@@ -1454,7 +1508,7 @@ allocStacks(void)
   if ( !gBase || !tBase || !aBase )
   { if ( gBase )
       *gBase++ = MARK_MASK;		/* compensate for freeStacks */
-    freeStacks(PASS_LD1);
+    freeStacks();
     return FALSE;
   }
 
@@ -1476,7 +1530,7 @@ allocStacks(void)
 
 
 void
-freeStacks(ARG1_LD)
+freeStacks(DECL_LD)
 { if ( gBase )
   { gBase--;
     stack_free(gBase);
@@ -1545,7 +1599,7 @@ trimStacks() reclaims all unused space on the stack.
 - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
 void
-trimStacks(int resize ARG_LD)
+trimStacks(DECL_LD int resize)
 { LD->trim_stack_requested = FALSE;
 
   if ( resize )
@@ -1577,7 +1631,7 @@ static
 PRED_IMPL("trim_stacks", 0, trim_stacks, 0)
 { PRED_LD
 
-  trimStacks(TRUE PASS_LD);
+  trimStacks(TRUE);
 
   succeed;
 }
@@ -1648,7 +1702,7 @@ set_stack_limit(size_t limit)
                sizeStack(global) +
                sizeStack(trail) )
   { garbageCollect(GC_USER);
-    trimStacks(TRUE PASS_LD);
+    trimStacks(TRUE);
 
     if ( limit < sizeStack(local) +
 	         sizeStack(global) +
